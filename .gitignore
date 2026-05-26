@@ -1,0 +1,50 @@
+# Data: keep the directory skeleton, never commit real corpora.
+data/**
+!data/
+!data/**/
+!data/README.md
+!data/**/.gitkeep
+!data/**/*.md
+
+# Training artifacts
+outputs/
+runs/
+logs/
+checkpoints/
+models/
+wandb/
+mlruns/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+

@@ -1,0 +1,18 @@
+{
+  "description": "Raw MT corpus mix notes. Final training-format mixing will be defined later.",
+  "corpora": {
+    "wmt24pp_en_uk": {
+      "path": "data/training/MT/en-uk/wmt24pp",
+      "language_pair": "en-uk",
+      "granularities": {
+        "sentence": {
+          "target_share": 0.70
+        },
+        "paragraph": {
+          "target_share": 0.30
+        }
+      },
+      "notes": "Filters canary domain and bad sources; uses target as the reference translation."
+    }
+  }
+}
