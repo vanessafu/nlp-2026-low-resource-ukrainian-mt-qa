@@ -1,3 +1,18 @@
+"""
+loader.py  —  Download raw corpora and build a mixed-granularity parallel corpus.
+
+Run:
+    python scripts/loader.py
+
+Output:
+    data/training/MT/en-uk/wmt24pp_raw.tsv   (source / target, TSV)
+
+Sections
+--------
+1. Load raw data      (HuggingFace: google/wmt24pp  |  OPUS via datasets)
+2. Filter & select fields
+3. Build sentence + paragraph samples, mix, save
+"""
 
 from __future__ import annotations
 
@@ -92,6 +107,37 @@ def filter_wmt24pp(df: pl.DataFrame) -> pl.DataFrame:
     df = df[df["target"].str.strip() != ""]
     return df.reset_index(drop=True)
 
+def filtered_macocu(df: pl.DataFrame) -> pl.DataFrame:
+    """Basic quality filter for MaCoCu dataset (no document structure)."""
+    df = df[["source", "target"]].copy()
+    df = df.dropna()
+    df = df[df["source"].str.strip() != ""]
+    df = df[df["target"].str.strip() != ""]
+    return df.reset_index(drop=True)
+
+def filter_open_subtitles(df: pl.DataFrame) -> pl.DataFrame:
+    """Basic quality filter for OpenSubtitles dataset (no document structure)."""
+    df = df[["source", "target"]].copy()
+    df = df.dropna()
+    df = df[df["source"].str.strip() != ""]
+    df = df[df["target"].str.strip() != ""]
+    return df.reset_index(drop=True)
+
+def filter_tilde(df: pl.DataFrame) -> pl.DataFrame:
+    """Basic quality filter for TildeMODEL dataset (no document structure)."""
+    df = df[["source", "target"]].copy()
+    df = df.dropna()
+    df = df[df["source"].str.strip() != ""]
+    df = df[df["target"].str.strip() != ""]
+    return df.reset_index(drop=True)
+
+def filter_nllb(df: pl.DataFrame) -> pl.DataFrame:
+    """Basic quality filter for NLLB dataset (no document structure)."""
+    df = df[["source", "target"]].copy()
+    df = df.dropna()
+    df = df[df["source"].str.strip() != ""]
+    df = df[df["target"].str.strip() != ""]
+    return df.reset_index(drop=True)
 
 # =============================================================================
 # 3. BUILD SENTENCE + PARAGRAPH SAMPLES  →  MIX  →  SAVE
@@ -181,11 +227,41 @@ def build_and_save(df: pl.DataFrame, out_dir: Path, filename: str, granularity: 
 
 
 if __name__ == "__main__":
+    #training set:
+    #MT data froom OPUS:
+    open_subtitles_raw = load_opus("https://object.pouta.csc.fi/OPUS-OpenSubtitles/v2024/moses/en-uk.txt.zip",["en","cs"])
     
     #en-uk 
+    macocu_raw_en= load_opus("https://object.pouta.csc.fi/OPUS-MaCoCu/v2/moses/en-uk.txt.zip")
+    filtered_macocu = filtered_macocu(macocu_raw_en,"en")
+    build_and_save(filtered_macocu, OUT_ROOT / "en-uk", "macocu_raw.tsv")
+    filtered_open_subtitles_en = filter_open_subtitles(open_subtitles_raw[0],"en")
+    build_and_save(filtered_open_subtitles_en, OUT_ROOT / "en-uk", "open_subtitles_raw.tsv")
+    tilde_raw_en = load_opus("https://object.pouta.csc.fi/OPUS-TildeMODEL/v2018/moses/en-uk.txt.zip","en")
+    filtered_tilde_en = filter_tilde(tilde_raw_en)
+    build_and_save(filtered_tilde_en, OUT_ROOT / "en-uk", "tilde_raw.tsv")
+    nllb_raw_en = load_huggingface("allenai/nllb", "eng_Latn-ukr_Cyrl")
+    filtered_nllb_en = filter_nllb(nllb_raw_en)
+    build_and_save(filtered_nllb_en, OUT_ROOT / "en-uk", "nllb_raw.tsv")
+    dochplt_raw_en = load_huggingface("HPLT/DocHPLT", "en-uk")
+    filtered_dochplt_en = filter_nllb(dochplt_raw_en)
+    build_and_save(filtered_dochplt_en, OUT_ROOT / "en-uk", "dochplt_raw.tsv")
+    
+    #cz-uk
+    filtered_open_subtitles_cz = filter_open_subtitles(open_subtitles_raw[1],"cs")
+    build_and_save(filtered_open_subtitles_cz, OUT_ROOT / "cz-uk", "open_subtitles_raw.tsv")
+    nllb_raw_cz = load_huggingface("allenai/nllb", "ces_Latn-ukr_Cyrl")
+    filtered_nllb_cz = filter_nllb(nllb_raw_cz)
+    build_and_save(filtered_nllb_cz, OUT_ROOT / "cz-uk", "nllb_raw.tsv")
+    
+    #qa
+    
+    
+    # validation set:
+    
+    # MT
     wmt24pp_raw = load_huggingface("google/wmt24pp", "en-uk")
     filtered = filter_wmt24pp(wmt24pp_raw)
     build_and_save(filtered, OUT_ROOT / "en-uk", "wmt24pp_raw.tsv")
-   
-    #qa
+    # QA
     
