@@ -37,13 +37,4 @@ Eight sequential stages. Each stage operates on `(source, target)` sentence/para
 | **NLLB cs-uk** | `laser_score ≥ 1.2` | S1 S2 S3 S4 S5 S6 S7 S8 |
 | **OpenSubtitles cs-uk** | None | S1 S2 S3 S4 S5 S6 S7 S8 |
 
-### MT Validation
 
-| Corpus | Filter | Pipeline stages |
-|--------|--------|-----------------|
-| **WMT24++ en-uk** | Remove `domain == "canary"` and `is_bad_source == True` rows | None (human-annotated gold data) |
-| **TildeMODEL en-uk** | None | S1 S2 S3 S4 S5 S6 S7 S8 |
-
-### QA (Training & Validation)
-
-No automated cleaning pipeline. Data sourced from structured QA datasets (Belebele, RC-QA); quality is controlled at the source.
