@@ -8,7 +8,7 @@ Eight sequential stages. Each stage operates on `(source, target)` sentence/para
 |-------|------|----------------|---------|
 | S1 | Unicode + HTML | Regex, `html.unescape`, `unicodedata.normalize("NFC")` | Remove zero-width chars, control chars, HTML tags, garbled glyphs; collapse repeated words/chars and whitespace |
 | S2 | Structural filter | Percentile-based thresholds (6.5–93.5 pct) on char length and char/word length ratio; soft score on punctuation symmetry | Drop pairs that are too short,or misaligned in length |
-| S3 | Deduplication | Exact: **Bloom filter** (MurmurHash3, capacity-adaptive). Near: **MinHash + LSH** (128 permutations, band-based, Jaccard ≈ 0.90 threshold) | Remove identical and near-duplicate sentence pairs across the full corpus |
+| S3 | Deduplication | Exact: **Bloom filter** (MurmurHash3). Near: **MinHash + LSH** (128 permutations, band-based, Jaccard ≈ 0.90 threshold) | Remove identical and near-duplicate sentence pairs across the full corpus |
 | S4 | Language ID | **FastText `lid.176.bin`** (Meta), confidence ≥ 0.87 | Keep only pairs where source is the expected language and target is Ukrainian |
 | S5 | Ukrainian quality | Rule-based: ratio of Ukrainian-only letters (і,ї,є,ґ), penalise Russian character markers (ы,э,ъ,ё) and Russian function words | Score target-side Cyrillics; detect and penalise Russian contamination |
 | S6 | Entity consistency | Regex matching on numbers, percentages, URLs | Reject pairs where numeric/URL counts diverge between source and target |
