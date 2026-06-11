@@ -77,7 +77,7 @@ Raw TSV pool (before caps): ~758k pairs across 7 files
 
 | File | Items | Source |
 |------|------:|--------|
-| train_augmented.json | 7,344 | ZNO/NMT questions ×4 augmented |
+| train_augmented.json | 7,344 | ZNO/NMT questions ×3 augmented |
 | belebele_rc.json | 900 | facebook/belebele ukr_Cyrl RC |
 | quarc_rc.json | 875 | QUA-RC Ukrainian reading comprehension |
 | **Total** | **9,119** | |
