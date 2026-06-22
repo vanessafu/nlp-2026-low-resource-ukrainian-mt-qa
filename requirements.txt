@@ -1,6 +1,5 @@
 # ── Core data processing ──────────────────────────────────────────────────────
 polars>=0.20.0
-pandas>=2.0.0
 pyarrow>=14.0.0
 
 # ── HuggingFace ───────────────────────────────────────────────────────────────
@@ -9,6 +8,9 @@ transformers>=4.35.0
 
 # ── HTTP / download ───────────────────────────────────────────────────────────
 requests>=2.31.0
+
+# ── HTML parsing (ZNO/NMT dataset extraction) ─────────────────────────────────
+beautifulsoup4>=4.12.0
 # curl must be available as a system binary (used for MaCoCu download)
 
 # ── Near-dedup (Stage 2) ──────────────────────────────────────────────────────
@@ -26,10 +28,3 @@ sentence-transformers>=2.3.0
 # ── QE scoring (Stage 9, optional) ────────────────────────────────────────────
 # pymarian  — install from source: https://github.com/marian-nmt/pymarian
 
-# ── Training (Qwen2.5-3B QLoRA) ───────────────────────────────────────────────
-torch>=2.1.0
-peft>=0.7.0
-trl>=0.7.0
-accelerate>=0.25.0
-bitsandbytes>=0.41.0
-scipy>=1.11.0

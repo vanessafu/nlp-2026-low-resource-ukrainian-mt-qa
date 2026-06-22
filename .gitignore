@@ -1,10 +1,12 @@
 # Data: keep the directory skeleton, never commit real corpora.
 data/**
-!data/
-!data/**/
-!data/README.md
-!data/**/.gitkeep
-!data/**/*.md
+# !data/
+# !data/**/
+# !data/**/.gitkeep
+# !data/**/README.md
+# !data/**/*.md
+
+scripts/**
 
 # Training artifacts
 outputs/
@@ -14,6 +16,9 @@ checkpoints/
 models/
 wandb/
 mlruns/
+
+# Jobs
+jobs/
 
 # Python
 __pycache__/
@@ -47,4 +52,6 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+
 
