@@ -20,7 +20,6 @@ from __future__ import annotations
 import gzip
 import io
 import random
-import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -57,7 +56,7 @@ DATA_DIR  = Path(__file__).parent.parent / "data"
 OUT_TRAIN = DATA_DIR / "training"  / "MT"
 OUT_VAL   = DATA_DIR / "validation" / "MT"
 RAW_DIR   = DATA_DIR / "raw"
-
+MACOCU_URL = "https://www.clarin.si/repository/xmlui/bitstream/handle/11356/1858/MaCoCu-uk-en.sent.txt.gz"
 
 # =============================================================================
 # 1.  DOWNLOAD / LOAD RAW DATA
@@ -78,49 +77,6 @@ def load_huggingface(
     print(f"  [{dataset_name}/{lang_pair}]  split={split!r}  rows={len(ds[split]):,}")
     return pl.from_pandas(ds[split].to_pandas())
 
-
-def download_macocu(lang_pair: str = "uk-en", out_dir: Optional[Path] = None) -> Path:
-    """
-    Download MaCoCu from CLARIN using curl (NOT OPUS).
-    Returns local .gz path; skips download if already cached.
-    """
-    if out_dir is None:
-        out_dir = RAW_DIR / "macocu"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    filename = f"MaCoCu-{lang_pair}.doc.txt.gz"
-    out_path = out_dir / filename
-    if out_path.exists() and out_path.stat().st_size > 0:
-        print(f"  [cache] {out_path}  ({out_path.stat().st_size // 1_000_000} MB)")
-        return out_path
-
-    url = (
-        "https://www.clarin.si/repository/xmlui/bitstream/handle/11356/1858"
-        f"/{filename}"
-    )
-    print(f"  Downloading {url} …")
-    subprocess.run(
-        ["curl", "--fail", "--location", "--progress-bar", "--output", str(out_path), url],
-        check=True,
-    )
-    print(f"  → {out_path.stat().st_size // 1_000_000} MB saved.")
-    return out_path
-
-
-def load_macocu_gz(gz_path: Path) -> "pl.DataFrame":
-    """Read MaCoCu .doc.txt.gz (gzipped TSV with header) into a DataFrame."""
-    print(f"  Reading {gz_path.name} …")
-    with gzip.open(gz_path, "rb") as fh:
-        content: bytes = fh.read()
-    df = pl.read_csv(
-        content,
-        separator="\t",
-        quote_char=None,
-        infer_schema_length=20_000,
-        ignore_errors=True,
-    )
-    print(f"  → {len(df):,} rows, {len(df.columns)} columns")
-    return df
 
 
 def load_opus_moses(url: str, src_lang: str, tgt_lang: str = "uk") -> "pl.DataFrame":
@@ -154,6 +110,59 @@ def load_opus_moses(url: str, src_lang: str, tgt_lang: str = "uk") -> "pl.DataFr
     return pl.DataFrame({"source": src_lines, "target": tgt_lines})
 
 
+def stream_tsv_gz(
+    path_or_url: "str | Path",
+    chunk_rows: int = 100_000,
+):
+    """
+    Yield polars DataFrames by streaming a gzipped TSV from a local path or HTTP URL.
+    Header row is parsed once; each chunk contains at most chunk_rows rows.
+    All columns are returned as their inferred types (cast numeric columns downstream).
+    """
+    import io as _io
+
+    local = Path(path_or_url)
+    if local.exists():
+        raw_fh = gzip.open(local, "rb")
+    else:
+        resp = requests.get(str(path_or_url), stream=True, timeout=600)
+        resp.raise_for_status()
+        resp.raw.decode_content = True
+        raw_fh = gzip.GzipFile(fileobj=resp.raw)
+
+    text_fh = _io.TextIOWrapper(raw_fh, encoding="utf-8", errors="replace")
+    try:
+        header_line = text_fh.readline()
+        if not header_line:
+            return
+        header = header_line.rstrip("\n").split("\t")
+
+        buf: list[str] = []
+        for line in text_fh:
+            buf.append(line)
+            if len(buf) >= chunk_rows:
+                yield pl.read_csv(
+                    "".join(buf).encode(),
+                    separator="\t",
+                    has_header=False,
+                    new_columns=header,
+                    quote_char=None,
+                    ignore_errors=True,
+                )
+                buf = []
+        if buf:
+            yield pl.read_csv(
+                "".join(buf).encode(),
+                separator="\t",
+                has_header=False,
+                new_columns=header,
+                quote_char=None,
+                ignore_errors=True,
+            )
+    finally:
+        text_fh.close()
+
+
 # =============================================================================
 # 2.  DATASET-SPECIFIC FILTERS
 #
@@ -167,43 +176,6 @@ def load_opus_moses(url: str, src_lang: str, tgt_lang: str = "uk") -> "pl.DataFr
 # Low-quality / no-quality-columns (OPUS Moses, HF without scores):
 #   run S1 + S2 + S5 (structural) + S6 (entity) + S7 (copy-source).
 # =============================================================================
-
-def filtered_macocu(
-    df: "pl.DataFrame",
-    stats_dir: Optional[Path] = None,
-) -> "pl.DataFrame":
-    """
-    MaCoCu uk-en column filters (bicleaner_ai / bifixer / bleualign / boilerplate).
-
-    Column mapping:  src_text = Ukrainian → 'target',  trg_text = English → 'source'.
-    High-quality corpus: only S1 unicode + S2 dedup from pipeline.
-    """
-    from cleaning_pipeline import run_stages
-
-    _BOILERPLATE_OK = ["good", "neargood", "good-good"]
-    df = df.with_columns(
-        pl.col("bicleaner_ai_score").cast(pl.Float64, strict=False),
-        pl.col("bifixer_score").cast(pl.Float64, strict=False),
-        pl.col("bleualign_score").cast(pl.Float64, strict=False),
-    ).filter(
-        (pl.col("bicleaner_ai_score") >= 0.86)
-        & (pl.col("bifixer_score")      >= 301.2)
-        & (pl.col("bleualign_score")    >= 0.60)
-        & pl.col("src_boilerplate").str.strip_chars().is_in(_BOILERPLATE_OK)
-        & pl.col("trg_boilerplate").str.strip_chars().is_in(_BOILERPLATE_OK)
-        & (pl.col("biroamer_entities_detected").str.strip_chars() == "No")
-        & pl.col("src_text").is_not_null()
-        & pl.col("trg_text").is_not_null()
-        & (pl.col("src_text").str.strip_chars() != "")
-        & (pl.col("trg_text").str.strip_chars() != "")
-    )
-    df = df.select(
-        pl.col("trg_text").alias("source"),
-        pl.col("src_text").alias("target"),
-    )
-    print(f"  → {len(df):,} after column filters")
-    # Column filters already ensure high quality; add only copy-source check (S7)
-    return run_stages(df, "en-uk", stages=[1, 2, 7], dataset="macocu", stats_dir=stats_dir)
 
 
 def filter_nllb(
@@ -557,20 +529,8 @@ if __name__ == "__main__":
     STATS_DIR = DATA_DIR / "stats"
 
     # ── en-uk training ────────────────────────────────────────────────────────
-
-    print("\n=== MaCoCu uk-en ===")
-    save_sentence_corpus(
-        filtered_macocu(load_macocu_gz(download_macocu("uk-en")),
-                        stats_dir=STATS_DIR / "en-uk"),
-        OUT_TRAIN / "en-uk", "macocu.tsv",
-    )
-
-    print("\n=== NLLB eng_Latn-ukr_Cyrl ===")
-    save_sentence_corpus(
-        filter_nllb(load_huggingface("allenai/nllb", "eng_Latn-ukr_Cyrl"),
-                    lang_pair="en-uk", stats_dir=STATS_DIR / "en-uk"),
-        OUT_TRAIN / "en-uk", "nllb.tsv",
-    )
+    # MaCoCu: run separately via  python scripts/corpus/macocu.py
+    # NLLB:   run separately via  python scripts/corpus/nllb.py --lang-pair en-uk
 
     print("\n=== OpenSubtitles en-uk ===")
     save_sentence_corpus(
@@ -604,13 +564,7 @@ if __name__ == "__main__":
     )
 
     # ── cs-uk training ────────────────────────────────────────────────────────
-
-    print("\n=== NLLB ces_Latn-ukr_Cyrl ===")
-    save_sentence_corpus(
-        filter_nllb(load_huggingface("allenai/nllb", "ces_Latn-ukr_Cyrl"),
-                    lang_pair="cs-uk", stats_dir=STATS_DIR / "cs-uk"),
-        OUT_TRAIN / "cs-uk", "nllb.tsv",
-    )
+    # NLLB:   run separately via  python scripts/corpus/nllb.py --lang-pair cs-uk
 
     print("\n=== OpenSubtitles cs-uk ===")
     save_sentence_corpus(

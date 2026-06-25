@@ -9,26 +9,6 @@
   7  Copy-source / untranslation detection
   8  Semantic alignment scoring  (multilingual-e5-small, ONNX/int8 optional)
   9  QE-style quality scoring  (PyMarian; composite fallback when unavailable)
-
-Usage
-  # Full pipeline
-  python scripts/cleaning_pipeline.py \\
-      --input  data/training/MT/en-uk/macocu.tsv \\
-      --output data/training/MT/en-uk/macocu_clean.tsv \\
-      --lang-pair en-uk --stages all --workers 8
-
-  # Single stage (Stage 3 only)
-  python scripts/cleaning_pipeline.py \\
-      --input raw.tsv --output stage3.tsv --lang-pair en-uk --stages 3
-
-  # Calibrate structural thresholds from data, then filter
-  python scripts/cleaning_pipeline.py \\
-      --input raw.tsv --output filtered.tsv \\
-      --lang-pair en-uk --calibrate --stages 5
-
-  # Statistics only (no filtering)
-  python scripts/cleaning_pipeline.py \\
-      --input raw.tsv --lang-pair en-uk --stats-only
 """
 
 from __future__ import annotations
@@ -194,27 +174,27 @@ class PipelineConfig:
     # Stage 2
     dedup_exact:    bool  = True
     dedup_near:     bool  = True
-    minhash_threshold: float = 0.85
+    minhash_threshold: float = 0.90
     minhash_perms:  int   = 128
     bloom_capacity: int   = 50_000_000
     bloom_fpr:      float = 0.001
     # Stage 3
     fasttext_model: Optional[str] = None   # path to lid.176.bin; auto-downloaded if None
-    lid_threshold:  float = 0.70
+    lid_threshold:  float = 0.95
     # Stage 4
     uk_quality_min: float = 0.0            # reject if score < this; 0 = off
     # Stage 8
     embed_model:    str   = "intfloat/multilingual-e5-small"
     embed_batch:    int   = 512
-    embed_sim_min:  float = 0.60
+    embed_sim_min:  float = 0.95
     use_onnx:       bool  = True           # try ONNX/int8; fall back to torch
     # Stage 9
     qe_model:       Optional[str] = None   # path to PyMarian model dir
     composite_min:  float = 0.50
     composite_weights: dict = field(default_factory=lambda: {
         "semantic": 0.35,
-        "uk_quality": 0.30,
-        "structural": 0.20,
+        "uk_quality": 0.35,
+        "structural": 0.15,
         "qe": 0.15,
     })
     # Audit
@@ -436,16 +416,6 @@ class FilterStage:
 # =============================================================================
 
 def unicode_normalize_pair(src: str, tgt: str) -> tuple[str, str]:
-    """
-    Normalize a single pair.  Callable standalone.
-
-    Steps:
-    1. NFC normalization (canonical decomposition → re-composition)
-    2. Remove zero-width / soft-hyphen chars
-    3. Remove non-printable control chars (keep \\n\\t)
-    4. Collapse whitespace runs to single space, strip
-    5. Ukrainian apostrophe normalization: ʼ → '  (U+02BC → U+0027)
-    """
     def _clean(text: str) -> str:
         text = unicodedata.normalize("NFC", text)
         text = _RE_ZERO_WIDTH.sub("", text)
@@ -1229,15 +1199,24 @@ class SemanticAlignmentStage(FilterStage):
 
     def setup(self) -> None:
         model_name = self.cfg.embed_model
-        onnx_dir   = Path.home() / ".cache" / "multilingual_e5_small_int8"
 
-        # Try ONNX/int8 first
-        if self.cfg.use_onnx:
+        # Detect GPU: prefer CUDA, skip ONNX/int8 (CPU-only AVX512 path) when GPU available.
+        try:
+            import torch as _torch
+            _gpu_available = _torch.cuda.is_available()
+        except ImportError:
+            _gpu_available = False
+
+        device = "cuda" if _gpu_available else "cpu"
+        logger.info("Semantic stage: device=%s", device)
+
+        # ONNX/int8 path — CPU-only optimisation, skip when GPU is present.
+        if self.cfg.use_onnx and not _gpu_available:
+            onnx_dir = Path.home() / ".cache" / "multilingual_e5_small_int8"
             try:
                 from optimum.onnxruntime import ORTModelForFeatureExtraction
                 from transformers import AutoTokenizer
                 import numpy as np
-                from scipy.spatial.distance import cosine
 
                 if not onnx_dir.exists():
                     logger.info("Exporting %s to ONNX int8 → %s", model_name, onnx_dir)
@@ -1258,8 +1237,7 @@ class SemanticAlignmentStage(FilterStage):
                     inputs = tok(texts, padding=True, truncation=True,
                                  max_length=128, return_tensors="np")
                     out  = model(**inputs)
-                    # E5 uses mean pooling over non-padding tokens, not [CLS]
-                    hidden = out.last_hidden_state          # [B, S, D]
+                    hidden = out.last_hidden_state
                     mask   = inputs["attention_mask"][:, :, None].astype(float)
                     embs   = (hidden * mask).sum(axis=1) / mask.sum(axis=1).clip(1e-9)
                     norms  = np.linalg.norm(embs, axis=1, keepdims=True)
@@ -1269,28 +1247,53 @@ class SemanticAlignmentStage(FilterStage):
                 logger.info("Semantic stage: ONNX int8 model loaded from %s", onnx_dir)
                 return
             except Exception as exc:
-                logger.info("ONNX init failed (%s), falling back to torch.", exc)
+                logger.info("ONNX init failed (%s), falling back to sentence_transformers.", exc)
 
-        # Fallback: sentence_transformers
+        # sentence_transformers path — uses GPU when device='cuda', CPU fallback on OOM.
         try:
             from sentence_transformers import SentenceTransformer
-            st_model = SentenceTransformer(model_name)
+        except ImportError as exc:
+            logger.warning("Stage 8 unavailable: sentence-transformers not installed (%s).", exc)
+            return
 
-            def _st_encode(texts: list[str]) -> Any:
-                return st_model.encode(
-                    texts,
-                    batch_size=self.cfg.embed_batch,
-                    normalize_embeddings=True,
-                    show_progress_bar=False,
-                )
+        def _try_load(dev: str) -> "SentenceTransformer | None":
+            try:
+                return SentenceTransformer(model_name, device=dev)
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower() or "cuda" in str(e).lower():
+                    return None
+                raise
 
-            self._encode = _st_encode
-            logger.info("Semantic stage: SentenceTransformer model loaded (%s)", model_name)
-        except ImportError:
+        st_model = _try_load(device)
+        if st_model is None and device == "cuda":
             logger.warning(
-                "sentence_transformers not installed. Stage 8 will be skipped. "
-                "Install: pip install sentence_transformers"
+                "Semantic stage: CUDA OOM loading %s — retrying on CPU.", model_name
             )
+            try:
+                import torch as _t
+                _t.cuda.empty_cache()
+            except Exception:
+                pass
+            st_model = _try_load("cpu")
+            device = "cpu"
+
+        if st_model is None:
+            logger.warning("Stage 8 unavailable: could not load %s on any device.", model_name)
+            return
+
+        # Reduce batch size on CPU to avoid memory issues.
+        batch = self.cfg.embed_batch if device == "cuda" else min(self.cfg.embed_batch, 64)
+
+        def _st_encode(texts: list[str]) -> Any:
+            return st_model.encode(
+                texts,
+                batch_size=batch,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+
+        self._encode = _st_encode
+        logger.info("Semantic stage: SentenceTransformer loaded (%s) on %s", model_name, device)
 
     def apply(self, df: pl.DataFrame) -> tuple[pl.DataFrame, StageStats]:
         if self._encode is None:
@@ -1496,9 +1499,62 @@ class FilterPipeline:
 
     def setup(self) -> None:
         """Initialize all stages (load models, build Bloom filter, etc.)."""
+        self._print_config()
         for stage in self.stages:
             logger.info("Initializing %s …", stage.name)
             stage.setup()
+
+    def _print_config(self) -> None:
+        cfg = self.cfg
+        stage_names = {
+            1: "unicode", 2: "dedup", 3: "langid", 4: "uk_quality",
+            5: "structural", 6: "entity", 7: "copy_src", 8: "semantic", 9: "qe",
+        }
+        active = sorted(cfg.stages)
+        stage_str = " ".join(
+            f"{n}:{stage_names.get(n, '?')}" for n in active
+        )
+
+        thresh = cfg.get_thresholds()
+        lines = [
+            f"  lang_pair      : {cfg.lang_pair}",
+            f"  stages         : [{stage_str}]",
+        ]
+        if 2 in active:
+            lines += [
+                f"  dedup_exact    : {cfg.dedup_exact}",
+                f"  dedup_near     : {cfg.dedup_near}"
+                + (f"  (threshold={cfg.minhash_threshold}, perms={cfg.minhash_perms})"
+                   if cfg.dedup_near else ""),
+                f"  bloom_capacity : {cfg.bloom_capacity:,}",
+            ]
+        if 3 in active:
+            lines.append(f"  lid_threshold  : {cfg.lid_threshold}")
+        if 4 in active:
+            lines.append(f"  uk_quality_min : {cfg.uk_quality_min}")
+        if 5 in active:
+            lines += [
+                f"  struct_src_chars: [{thresh['min_src_chars']:.0f}, {thresh['max_src_chars']:.0f}]",
+                f"  struct_tgt_chars: [{thresh['min_tgt_chars']:.0f}, {thresh['max_tgt_chars']:.0f}]",
+                f"  char_ratio     : [{thresh['char_ratio_min']}, {thresh['char_ratio_max']}]",
+                f"  word_ratio     : [{thresh['word_ratio_min']}, {thresh['word_ratio_max']}]",
+            ]
+        if 8 in active:
+            lines += [
+                f"  embed_model    : {cfg.embed_model}",
+                f"  embed_sim_min  : {cfg.embed_sim_min}",
+                f"  embed_batch    : {cfg.embed_batch}",
+            ]
+        if 9 in active:
+            lines += [
+                f"  qe_model       : {cfg.qe_model or '(none — composite fallback)'}",
+                f"  composite_min  : {cfg.composite_min}",
+            ]
+
+        print("── Pipeline config ──────────────────────────────────────────")
+        for line in lines:
+            print(line)
+        print("─" * 60)
 
     def run(
         self,
