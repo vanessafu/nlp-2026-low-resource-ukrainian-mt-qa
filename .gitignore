@@ -1,12 +1,13 @@
 # Data: keep the directory skeleton, never commit real corpora.
 data/**
+prepared/**
+train_data/**
 # !data/
 # !data/**/
 # !data/**/.gitkeep
 # !data/**/README.md
 # !data/**/*.md
 
-scripts/**
 
 # Training artifacts
 outputs/
@@ -28,6 +29,9 @@ __pycache__/
 .venv/
 venv/
 env/
+venv_wmt26/
+.local/
+.pydeps/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

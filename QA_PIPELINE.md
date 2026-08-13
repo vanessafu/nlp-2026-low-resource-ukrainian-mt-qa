@@ -3,24 +3,41 @@
 This document describes how the Ukrainian QA training corpus is assembled,
 which scripts are involved, and what each output file contains.
 
+Entry point: `bash scripts/prepare_qa_training.sh` runs the full ZNO chain
+below and writes `train_data/QA/ukr_zno_qa_train.jsonl` +
+`train_data/QA/train_merged.jsonl` (ZNO, optionally + MMLU if a
+`ukr_mmlu_qa_train_chat.jsonl` file has been added — see §1.2 note).
+
 ---
 
 ## 1. Raw Data Sources
 
-### 1.1 Competition baseline (`llms-limited-resources2025/Ukrainian/QA/`)
+### 1.1 Competition baseline (`train_data/QA/ukr_qa_{train,dev}.jsonl`)
 
-Official splits provided by the WMT25 shared task.
-All items are single-choice MCQ with Cyrillic option markers (А/Б/В/Г/Д).
+Official 2026 splits, fetched from the `TUM-NLP/llms-limited-resources2026`
+GitHub repo (`Ukrainian/QA/`) by `scripts/prepare_qa_training.sh` on first run.
+All items are single-choice MCQ, but — unlike the retired 2025 baseline —
+options are keyed by **number** (`possible_answers: {"0": ..., "1": ...}`,
+`correct_answer_num: <int>`) instead of Cyrillic letters. `scripts/qa/constants.py`'s
+`load_qa_records()` normalizes this to the same internal letter-marker shape
+(`answers: [{"marker","text"}]`, `correct_answers: [marker]`) used everywhere
+downstream, so every script below is agnostic to which format it was given.
 
-| Split | Items | ukrainian-language-and-literature | history-of-ukraine |
-|-------|------:|-----------------------------------|--------------------|
-| `train.json` | 2,450 | 1,540 | 910 |
-| `dev.json`   | 613   | 385   | 228 |
-| `test.json`  | 751   | 403   | 348 |
+`ukr_qa_dev.jsonl` is **evaluation only** — it is never written into training
+files, only used to exclude overlapping questions from the CoT set (§3).
 
-`dev.json` and `test.json` are **evaluation only** — they are never written into training files.
+There is no 2026 `test` split (the 2025 pipeline used train/dev/test; 2026 only
+ships train/dev for ZNO).
 
-### 1.2 DUMY (`NLPForUA/dumy-zno-ukrainian-math-history-geo-r1-o1`, HuggingFace)
+### 1.2 MMLU (`train_data/QA/ukr_mmlu_qa_train.jsonl`)
+
+Sibling 2026-official file (1,531 items), same numeric-option format as §1.1.
+Already present on disk. **Not yet wired into the build** — conversion to chat
+format is a separate, not-yet-implemented step; once
+`train_data/QA/ukr_mmlu_qa_train_chat.jsonl` exists, `scripts/qa/merge_qa_train.py`
+picks it up automatically when assembling `train_merged.jsonl`.
+
+### 1.3 DUMY (`NLPForUA/dumy-zno-ukrainian-math-history-geo-r1-o1`, HuggingFace)
 
 ZNO questions annotated with DeepSeek-R1 and OpenAI-o1 model outputs.
 Used as the source for **CoT training data**.
@@ -37,14 +54,14 @@ Fields used:
 - `o1_score` — quality gate (must equal 1 for single-choice correctness)
 - `answer_options` — option list with numeric labels (`1:`, `2:`, …)
 
-### 1.3 Belebele (`facebook/belebele`, `ukr_Cyrl` split)
+### 1.4 Belebele (`facebook/belebele`, `ukr_Cyrl` split)
 
 900 Ukrainian reading-comprehension questions from the Belebele benchmark.
 Each question has a Flores passage embedded in the prompt.
 Converted by `scripts/qa/convert_rc.py` and cached at
 `data/training/QA/belebele_rc.json`.
 
-### 1.4 QUA-RC (`QUA-RC/quarc.json`)
+### 1.5 QUA-RC (`QUA-RC/quarc.json`)
 
 875 Ukrainian reading-comprehension MCQs with passage context.
 Source text is embedded in the question field (same format as Belebele).
@@ -88,7 +105,7 @@ Augmentation axes:
 
 ```
 python scripts/qa/augment.py \
-    --input  llms-limited-resources2025/Ukrainian/QA/train.json \
+    --input  train_data/QA/ukr_qa_train.jsonl \
     --output data/training/QA/train_augmented.jsonl \
     --factor 2
 ```
@@ -115,7 +132,7 @@ Shared constants imported by all QA scripts.
 ### `scripts/qa/analyze_dumy.py`
 
 **Analysis-only tool** — prints overlap statistics between DUMY and the local
-competition splits. Writes no files.
+`train_data/QA/ukr_qa_{train,dev}.jsonl` splits. Writes no files.
 
 ```
 python scripts/qa/analyze_dumy.py [--cache-dir data/.hf_cache]
@@ -125,7 +142,8 @@ python scripts/qa/analyze_dumy.py [--cache-dir data/.hf_cache]
 
 ### `scripts/qa/build_cot.py` ← main entry point
 
-Assembles the final training corpus from all sources.
+Assembles the ZNO training corpus from all sources. Normally invoked via
+`scripts/prepare_qa_training.sh`, not directly.
 
 ```
 python scripts/qa/build_cot.py [--cache-dir data/.hf_cache] [--dry-run]
@@ -135,13 +153,25 @@ python scripts/qa/build_cot.py [--cache-dir data/.hf_cache] [--dry-run]
 
 ---
 
+### `scripts/qa/merge_qa_train.py`
+
+Combines `ukr_zno_qa_train.jsonl` (+ `ukr_mmlu_qa_train_chat.jsonl`, if present)
+into `train_data/QA/train_merged.jsonl`. Run automatically as the last step of
+`scripts/prepare_qa_training.sh`.
+
+---
+
 ## 3. Output Files
 
-### `data/training/QA/train_cot.jsonl` — CoT items only
+> Item counts below are from the retired 2025-based run and are kept as an
+> illustration of proportions — the 2026-official source has different totals,
+> re-run `build_cot.py` for current numbers.
 
-**1,322 items** (after running `build_cot.py`).
+### `train_data/QA/zno_cot_items.jsonl` — CoT items only
 
-Source: DUMY items where `o1_score == 1`, filtered against dev and test norms.
+**1,322 items** (2025-based run; will differ with the 2026 source).
+
+Source: DUMY items where `o1_score == 1`, filtered against dev norms.
 Format: chat (`system` / `user` / `assistant`).
 
 Two formats mixed in a **deterministic 70 / 30 split** (assigned by
@@ -189,26 +219,27 @@ assistant: {o1_answer reasoning}
 correctly). No requirement on `r1_score` or `r1_reasoning`.
 
 **CoT deduplication rules**:
-- Items whose question norm appears in `dev.json` or `test.json` are excluded (651 items filtered).
+- Items whose question norm appears in `ukr_qa_dev.jsonl` are excluded.
 - Duplicate questions within DUMY are deduplicated (first occurrence kept).
 
 ---
 
-### `data/training/QA/train_merged.jsonl` — full training corpus
+### `train_data/QA/ukr_zno_qa_train.jsonl` — ZNO training corpus
 
-**7,482 items** — all sources combined in a single file.
+**7,482 items** in the 2025-based run — all ZNO-side sources combined in a
+single file (MMLU is merged in separately, see below).
 
-| Source | Items | Format |
+| Source | Items (2025-based) | Format |
 |--------|------:|--------|
 | DUMY CoT (o1_score=1) | 1,322 | CoT (implicit 70 % + explicit 30 %) |
-| ZNO train.json × 2 | 4,496 | Standard, answer letter only |
+| ZNO train × 2 | 4,496 | Standard, answer letter only |
 | Belebele RC | 900 | Standard, answer letter only |
 | QUA-RC | 764 | Standard, answer letter only |
 | **Total** | **7,482** | |
 
 **ZNO 2× augmentation details**:
 
-`train.json` is oversampled 2× by generating 3 variants per question and
+`ukr_qa_train.jsonl` is oversampled 2× by generating 3 variants per question and
 selecting 2 based on whether the question also appears in the CoT set:
 
 - **CoT-overlap questions** (1,191 unique base questions): both selected variants
@@ -224,7 +255,7 @@ selecting 2 based on whether the question also appears in the CoT set:
 
 ---
 
-### `data/training/QA/build_stats.json`
+### `train_data/QA/build_stats.json`
 
 Per-source counts written after each `build_cot.py` run.
 
@@ -238,3 +269,12 @@ Per-source counts written after each `build_cot.py` run.
   "grand_total":  7482
 }
 ```
+
+---
+
+### `train_data/QA/train_merged.jsonl` — final training corpus
+
+Written by `scripts/qa/merge_qa_train.py`: `ukr_zno_qa_train.jsonl` shuffled
+together with `ukr_mmlu_qa_train_chat.jsonl` (MMLU, chat-format — skipped if
+that file doesn't exist yet; see §1.2). This is the file the rest of the
+training pipeline should read.

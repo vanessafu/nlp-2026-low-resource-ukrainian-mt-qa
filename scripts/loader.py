@@ -1,419 +1,368 @@
 """
-Download and filter parallel corpora for en-uk / cs-uk MT training.
-
-Each filter function:
-  1. Applies dataset-specific column-based quality filters
-  2. Calls run_stages() from cleaning_pipeline for generic cleaning
-
-Datasets with strong quality columns (MaCoCu, NLLB) use minimal pipeline
-stages (S1 unicode + S2 dedup) since column filters already ensure quality.
-
-Datasets without quality columns (OpenSubtitles, TildeMODEL, ParaCrawl,
-DocHPLT) run the full lightweight pipeline (S1–S2 + S5–S7).
+Now only cs-uk MT training/validation corpus.
 
 Usage
 -----
-  python scripts/loader.py          # build all training + validation sets
+  python scripts/loader.py <corpus> [options]
+  python scripts/loader.py eubookshop_cs_uk --no-align
+  python scripts/loader.py nllb --mode clean
+
+Corpora: eubookshop_cs_uk, elrc_cs_uk, wikimedia_cs_uk, nllb
+
+Every build_*() function downloads its own raw source, cleans it through
+cleaning_pipeline.py, and writes the result under data/training/MT/cs-uk/ or
+data/validation/MT/cz-uk/.
 """
 from __future__ import annotations
 
 import gzip
 import io
 import random
+import zipfile
 from pathlib import Path
 from typing import Optional
 
-import pandas as pd
+import polars as pl
 import requests
-import zipfile
 from datasets import load_dataset
 
-try:
-    import polars as pl
-    _POLARS = True
-except ImportError:
-    import pandas as pl   # type: ignore[no-redef]
-    _POLARS = False
-
-# =============================================================================
-# CONFIG
-# =============================================================================
+from cleaning_pipeline import (
+    FilterPipeline,
+    PipelineConfig,
+    compute_structural_score,
+    compute_uk_quality_score,
+    run_stages,
+    _DEFAULT_THRESHOLDS,
+)
 
 SEED = 42
 random.seed(SEED)
 
-SENTENCE_RATIO       = 0.70   # target fraction of sentence-level samples in WMT24PP mix
-SENTENCE_SAMPLE_RATE = 0.65   # fraction of eligible sentence rows to keep before mixing
-
-PARAGRAPH_CFG: dict[str, tuple[int, int]] = {
-    "news":     (6, 3),
-    "social":   (3, 2),
-    "speech":   (8, 4),
-    "literary": (5, 2),
-}
-
 DATA_DIR  = Path(__file__).parent.parent / "data"
-OUT_TRAIN = DATA_DIR / "training"  / "MT"
+OUT_TRAIN = DATA_DIR / "training"   / "MT"
 OUT_VAL   = DATA_DIR / "validation" / "MT"
 RAW_DIR   = DATA_DIR / "raw"
-MACOCU_URL = "https://www.clarin.si/repository/xmlui/bitstream/handle/11356/1858/MaCoCu-uk-en.sent.txt.gz"
 
-# =============================================================================
-# 1.  DOWNLOAD / LOAD RAW DATA
-# =============================================================================
-
-def load_huggingface(
-    dataset_name: str,
-    lang_pair: str,
-    split: Optional[str] = None,
-) -> "pl.DataFrame":
-    """
-    Load a HuggingFace dataset as a Polars DataFrame.
-    split=None → uses 'train' if available, else first split.
-    """
-    ds = load_dataset(dataset_name, lang_pair)
-    if split is None:
-        split = "train" if "train" in ds else next(iter(ds))
-    print(f"  [{dataset_name}/{lang_pair}]  split={split!r}  rows={len(ds[split]):,}")
-    return pl.from_pandas(ds[split].to_pandas())
-
-
-
-def load_opus_moses(url: str, src_lang: str, tgt_lang: str = "uk") -> "pl.DataFrame":
-    """
-    Download an OPUS Moses-format ZIP; return DataFrame with source/target columns.
-    Detects aligned text files by extension (.{src_lang} / .{tgt_lang}).
-    """
+def download(url: str) -> bytes:
     print(f"  Downloading {url} …")
     resp = requests.get(url, timeout=600, stream=True)
     resp.raise_for_status()
     raw = b"".join(resp.iter_content(chunk_size=1 << 20))
+    print(f"  Downloaded {len(raw) / 1e6:.1f} MB")
+    return raw
 
+
+def strip_lineno(line: str) -> str:
+    parts = line.split("\t", 1)
+    if len(parts) == 2 and parts[0].strip().isdigit():
+        return parts[1]
+    return line
+
+
+def parse_moses_zip(raw: bytes, src_lang: str, tgt_lang: str = "uk") -> tuple[list[str], list[str], Optional[list[str]]]:
+    """OPUS Moses zip → (src_lines, tgt_lines, ids_lines or None)."""
     with zipfile.ZipFile(io.BytesIO(raw)) as z:
         names    = z.namelist()
         src_file = next((n for n in names if n.endswith(f".{src_lang}")), None)
         tgt_file = next((n for n in names if n.endswith(f".{tgt_lang}")), None)
+        ids_file = next((n for n in names if n.endswith(".ids")), None)
         if src_file is None or tgt_file is None:
-            raise ValueError(
-                f"Expected .{src_lang} and .{tgt_lang} files inside {url}.\n"
-                f"Found: {names}"
-            )
-        src_lines = z.read(src_file).decode("utf-8").splitlines()
-        tgt_lines = z.read(tgt_file).decode("utf-8").splitlines()
+            raise ValueError(f"Expected .{src_lang} and .{tgt_lang} files in the ZIP.\nFound: {names}")
+
+        def read_text(name: str) -> list[str]:
+            text = z.read(name).decode("utf-8")
+            return [strip_lineno(l) for l in text.splitlines() if l.strip()]
+
+        src_lines = read_text(src_file)
+        tgt_lines = read_text(tgt_file)
+        ids_lines = None
+        if ids_file:
+            ids_lines = [l for l in z.read(ids_file).decode("utf-8").splitlines() if l.strip()]
 
     if len(src_lines) != len(tgt_lines):
-        raise ValueError(
-            f"Line count mismatch: {src_file}={len(src_lines):,}, "
-            f"{tgt_file}={len(tgt_lines):,}"
-        )
-    print(f"  → {len(src_lines):,} raw line pairs from zip")
-    return pl.DataFrame({"source": src_lines, "target": tgt_lines})
+        raise ValueError(f"Line count mismatch: {src_lang}={len(src_lines):,}  {tgt_lang}={len(tgt_lines):,}")
+    if ids_lines is not None and len(ids_lines) != len(src_lines):
+        print(f"  [warn] IDs length ({len(ids_lines):,}) != sentence count ({len(src_lines):,}) — ignoring ids.")
+        ids_lines = None
+    return src_lines, tgt_lines, ids_lines
 
 
-def stream_tsv_gz(
-    path_or_url: "str | Path",
-    chunk_rows: int = 100_000,
-):
+def doc_key(ids_line: str) -> str:
+    parts = ids_line.split("\t", 2)
+    return f"{parts[0]}\t{parts[1]}" if len(parts) >= 2 else ids_line
+
+
+def build_paragraphs(
+    src_lines: list[str], tgt_lines: list[str], ids_lines: Optional[list[str]],
+    min_sents: int, max_sents: int, min_chars: int, max_chars: int,
+) -> list[tuple[str, str]]:
     """
-    Yield polars DataFrames by streaming a gzipped TSV from a local path or HTTP URL.
-    Header row is parsed once; each chunk contains at most chunk_rows rows.
-    All columns are returned as their inferred types (cast numeric columns downstream).
+    Group sentences into paragraphs. Uses document boundaries from ids_lines
+    when available, otherwise groups consecutive sentences into random-sized
+    pseudo-documents. Either way, each document is then chunked into random
+    MIN_SENTS-MAX_SENTS windows and filtered by char length.
     """
-    import io as _io
+    n = len(src_lines)
+    docs: list[list[int]] = []
 
-    local = Path(path_or_url)
-    if local.exists():
-        raw_fh = gzip.open(local, "rb")
+    if ids_lines is not None:
+        cur_key: Optional[str] = None
+        cur_run: list[int] = []
+        for i, ids_line in enumerate(ids_lines):
+            key = doc_key(ids_line)
+            if key != cur_key:
+                if cur_run:
+                    docs.append(cur_run)
+                cur_key, cur_run = key, [i]
+            else:
+                cur_run.append(i)
+        if cur_run:
+            docs.append(cur_run)
     else:
-        resp = requests.get(str(path_or_url), stream=True, timeout=600)
-        resp.raise_for_status()
-        resp.raw.decode_content = True
-        raw_fh = gzip.GzipFile(fileobj=resp.raw)
+        pos = 0
+        while pos < n:
+            size = random.randint(min_sents, max_sents)
+            docs.append(list(range(pos, min(pos + size, n))))
+            pos += size
 
-    text_fh = _io.TextIOWrapper(raw_fh, encoding="utf-8", errors="replace")
-    try:
-        header_line = text_fh.readline()
-        if not header_line:
-            return
-        header = header_line.rstrip("\n").split("\t")
-
-        buf: list[str] = []
-        for line in text_fh:
-            buf.append(line)
-            if len(buf) >= chunk_rows:
-                yield pl.read_csv(
-                    "".join(buf).encode(),
-                    separator="\t",
-                    has_header=False,
-                    new_columns=header,
-                    quote_char=None,
-                    ignore_errors=True,
-                )
-                buf = []
-        if buf:
-            yield pl.read_csv(
-                "".join(buf).encode(),
-                separator="\t",
-                has_header=False,
-                new_columns=header,
-                quote_char=None,
-                ignore_errors=True,
-            )
-    finally:
-        text_fh.close()
+    paragraphs: list[tuple[str, str]] = []
+    for indices in docs:
+        pos = 0
+        while pos < len(indices):
+            size  = random.randint(min_sents, max_sents)
+            chunk = indices[pos: pos + size]
+            pos  += len(chunk)
+            if len(chunk) < min_sents:
+                break
+            src = " ".join(src_lines[i] for i in chunk).strip()
+            tgt = " ".join(tgt_lines[i] for i in chunk).strip()
+            if min_chars <= len(src) <= max_chars and min_chars <= len(tgt) <= max_chars:
+                paragraphs.append((src, tgt))
+    return paragraphs
 
 
-# =============================================================================
-# 2.  DATASET-SPECIFIC FILTERS
-#
-# Each function:
-#   a) Applies column-based quality filters unique to that dataset.
-#   b) Calls run_stages() from cleaning_pipeline for generic cleaning.
-#
-# High-quality corpora (MaCoCu, NLLB): column filters are strong enough;
-#   only run S1 (unicode) + S2 (dedup).
-#
-# Low-quality / no-quality-columns (OPUS Moses, HF without scores):
-#   run S1 + S2 + S5 (structural) + S6 (entity) + S7 (copy-source).
-# =============================================================================
+def describe_pairs(src_lines: list[str], tgt_lines: list[str], src_label: str, tgt_label: str) -> None:
+    n = len(src_lines)
+    print(f"\n── Raw corpus analysis ({n:,} pairs) ───────────────────────────────")
+    for label, lines in [(src_label, src_lines), (tgt_label, tgt_lines)]:
+        chars = sorted(len(l) for l in lines)
+        words = sorted(len(l.split()) for l in lines)
+        pct = lambda lst, p: lst[max(0, int(len(lst) * p) - 1)]
+        print(f"\n  {label}:")
+        print(f"    chars  min={min(chars):5}  p25={pct(chars,0.25):5}  p50={pct(chars,0.50):5}  "
+              f"p75={pct(chars,0.75):5}  p95={pct(chars,0.95):5}  max={max(chars):6}")
+        print(f"    words  min={min(words):5}  p25={pct(words,0.25):5}  p50={pct(words,0.50):5}  "
+              f"p75={pct(words,0.75):5}  p95={pct(words,0.95):5}  max={max(words):6}")
+    for i in random.sample(range(n), min(4, n)):
+        print(f"\n    src: {src_lines[i][:100]!r}\n    tgt: {tgt_lines[i][:100]!r}")
+    print("\n" + "─" * 70)
 
 
-def filter_nllb(
-    df: "pl.DataFrame",
-    lang_pair: str = "en-uk",
-    stats_dir: Optional[Path] = None,
-) -> "pl.DataFrame":
-    """
-    NLLB column filters (source/target LID + LASER score).
+def paragraph_quality_score(
+    src: str, tgt: str, lang_pair: str, len_saturate: float,
+    w_len: float = 0.55, w_struct: float = 0.25, w_uk: float = 0.20,
+) -> float:
+    avg_chars    = (len(src) + len(tgt)) / 2
+    len_score    = min(1.0, avg_chars / len_saturate)
+    struct_score = compute_structural_score(src, tgt, _DEFAULT_THRESHOLDS[lang_pair])[2]
+    uk_score     = compute_uk_quality_score(tgt)
+    return w_len * len_score + w_struct * struct_score + w_uk * uk_score
 
-    High-quality corpus: only S1 unicode + S2 dedup from pipeline.
-    lang_pair must be 'en-uk' or 'cs-uk' (not the HuggingFace lang code).
-    """
-    from cleaning_pipeline import run_stages
 
+def build_pipeline(
+    lang_pair: str, stages: list[int], *,
+    near_dedup: bool = True, near_threshold: float = 0.90,
+    embed_model: str = "intfloat/multilingual-e5-small", embed_sim_min: float = 0.85, embed_batch: int = 512,
+) -> FilterPipeline:
+    cfg = PipelineConfig(
+        lang_pair=lang_pair, stages=stages,
+        dedup_near=near_dedup, minhash_threshold=near_threshold,
+        embed_model=embed_model, embed_sim_min=embed_sim_min, embed_batch=embed_batch,
+    )
+    pipe = FilterPipeline(cfg)
+    pipe.setup()
+    return pipe
+
+
+def clean_pairs_in_chunks(pairs: list[tuple[str, str]], pipe: FilterPipeline, flush_size: int) -> pl.DataFrame:
+    """Run a persistent pipeline over a list of (src, tgt) pairs in chunks, concatenate the clean rows."""
+    chunks: list[pl.DataFrame] = []
+    n_clean = 0
+    for start in range(0, len(pairs), flush_size):
+        batch = pairs[start: start + flush_size]
+        df = pl.DataFrame({"source": [s for s, _ in batch], "target": [t for _, t in batch]})
+        clean, _ = pipe.run_df(df)
+        if len(clean):
+            chunks.append(clean.select(["source", "target"]))
+            n_clean += len(clean)
+        print(f"  [flush] processed={start + len(batch):,}  clean={n_clean:,}", flush=True)
+    return pl.concat(chunks) if chunks else pl.DataFrame({"source": [], "target": []})
+
+
+def split_by_quality(clean: pl.DataFrame, max_train: int, n_val: int, score_fn) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Rank by score_fn(src, tgt), take the best n_val rows as validation, cap the rest at max_train."""
+    n_clean = len(clean)
+    actual_val = max(50, min(n_val, int(n_clean * 0.05)))
+    if actual_val >= n_clean:
+        actual_val = max(1, n_clean // 10)
+        print(f"  [warn] Small corpus — reducing validation to {actual_val}")
+
+    clean = clean.with_columns(
+        pl.struct(["source", "target"]).map_elements(
+            lambda r: score_fn(r["source"], r["target"]), return_dtype=pl.Float64,
+        ).alias("_score")
+    ).sort("_score", descending=True)
+
+    val_df   = clean.head(actual_val).select(["source", "target"])
+    train_df = clean.tail(n_clean - actual_val).select(["source", "target"]).head(max_train)
+    print(f"  Validation: {len(val_df):,} pairs   Training: {len(train_df):,} pairs")
+    return train_df, val_df
+
+
+def rank_and_cap(df: pl.DataFrame, max_n: int, score_fn) -> pl.DataFrame:
+    if len(df) <= max_n:
+        return df.select(["source", "target"])
+    print(f"  Output {len(df):,} exceeds cap {max_n:,} — ranking by quality …")
+    df = df.with_columns(
+        pl.struct(["source", "target"]).map_elements(
+            lambda r: score_fn(r["source"], r["target"]), return_dtype=pl.Float64,
+        ).alias("_score")
+    ).sort("_score", descending=True).head(max_n)
+    return df.select(["source", "target"])
+
+
+def save_tsv(df: pl.DataFrame, path: Path) -> None:
     df = df.filter(
-        pl.col("source_sentence_lid").is_between(0.95, 1.01)
-        & pl.col("target_sentence_lid").is_between(0.98, 1.01)
-        & (pl.col("laser_score") >= 1.10)
+        pl.col("source").is_not_null() & pl.col("target").is_not_null()
+        & (pl.col("source").str.strip_chars() != "") & (pl.col("target").str.strip_chars() != "")
+    ).select(["source", "target"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("source\ttarget\n")
+        for src, tgt in df.iter_rows():
+            f.write(f"{' '.join(str(src).split())}\t{' '.join(str(tgt).split())}\n")
+    print(f"  saved → {path}  ({len(df):,} pairs)")
+
+
+def build_eubookshop_cs_uk(
+    out_dir: Optional[Path] = None, val_dir: Optional[Path] = None,
+    max_train: int = 100_000, n_val: int = 150, no_align: bool = False,
+) -> None:
+    train_path = (out_dir or OUT_TRAIN / "cs-uk") / "eubookshop.tsv"
+    val_path   = (val_dir or OUT_VAL   / "cz-uk") / "eubookshop.tsv"
+
+    cs_lines, uk_lines, ids_lines = parse_moses_zip(
+        download("https://object.pouta.csc.fi/OPUS-EUbookshop/v2/moses/cs-uk.txt.zip"), "cs", "uk",
     )
-    df = _unpack_translation(df["translation"])
-    print(f"  → {len(df):,} after LID + LASER filters")
-    # LASER pre-filters alignment; add UK quality + structural + copy-source
-    return run_stages(df, lang_pair, stages=[1, 2, 4, 5, 7], dataset=f"nllb_{lang_pair}",
-                      stats_dir=stats_dir)
+    print(f"  Parsed: {len(cs_lines):,} sentence pairs  "
+          f"(ids: {'found' if ids_lines else 'not found, using consecutive grouping'})")
+    describe_pairs(cs_lines, uk_lines, "Source (cs)", "Target (uk)")
 
+    print("\n── Building paragraphs (3–15 sents, 80–4000 chars) ──")
+    paragraphs = build_paragraphs(cs_lines, uk_lines, ids_lines, 3, 15, 80, 4_000)
+    print(f"  Paragraph pairs (pre-clean): {len(paragraphs):,}")
 
-def filter_wmt24pp(df: "pl.DataFrame") -> "pl.DataFrame":
-    """
-    WMT24PP column filters (removes canary sentences and bad-source rows).
-    Returns document_id / segment_id / domain columns needed by build_and_save_wmt24pp.
-    No pipeline: validation data should not be deduplicated or structurally filtered.
-    """
-    return (
-        df.filter(
-            (pl.col("domain") != "canary")
-            & (~pl.col("is_bad_source"))
-            & pl.col("source").is_not_null()
-            & pl.col("target").is_not_null()
-            & (pl.col("source").str.strip_chars() != "")
-            & (pl.col("target").str.strip_chars() != "")
-        )
-        .select(["document_id", "segment_id", "domain", "source", "target"])
-    )
+    stages = [1, 2, 3, 5, 6, 7] + ([] if no_align else [8])
+    pipe   = build_pipeline("cs-uk", stages, near_threshold=0.90, embed_sim_min=0.78)
+    clean  = clean_pairs_in_chunks(paragraphs, pipe, flush_size=10_000)
+    print(f"\n  Post-pipeline: {len(clean):,} pairs")
 
-
-def filter_open_subtitles(
-    df: "pl.DataFrame",
-    lang_pair: str = "en-uk",
-    stats_dir: Optional[Path] = None,
-) -> "pl.DataFrame":
-    """
-    OpenSubtitles (OPUS Moses): highly noisy, no quality columns.
-    Runs full pipeline including LangID (S3), UK-quality (S4), and semantic (S8).
-    """
-    from cleaning_pipeline import run_stages
-
-    return run_stages(
-        df, lang_pair, stages=[1, 2, 3, 4, 5, 6, 7, 8],
-        dataset=f"open_subtitles_{lang_pair}", stats_dir=stats_dir,
-    )
-
-
-def filter_tilde(
-    df: "pl.DataFrame",
-    lang_pair: str = "en-uk",
-    stats_dir: Optional[Path] = None,
-) -> "pl.DataFrame":
-    """TildeMODEL (OPUS Moses): basic alignment only, moderate noise — full pipeline."""
-    from cleaning_pipeline import run_stages
-
-    return run_stages(
-        df, lang_pair, stages=[1, 2, 3, 4, 5, 6, 7, 8],
-        dataset=f"tilde_{lang_pair}", stats_dir=stats_dir,
-    )
-
-
-def filter_paracrawl(
-    df: "pl.DataFrame",
-    lang_pair: str = "en-uk",
-    stats_dir: Optional[Path] = None,
-) -> "pl.DataFrame":
-    """
-    ParaCrawl (OPUS Moses): CLD2 LID + neural cleaning applied upstream,
-    but still noisy at lower confidence ranges — full pipeline.
-    """
-    from cleaning_pipeline import run_stages
-
-    return run_stages(
-        df, lang_pair, stages=[1, 2, 3, 4, 5, 6, 7, 8],
-        dataset=f"paracrawl_{lang_pair}", stats_dir=stats_dir,
-    )
-
-
-def _build_docholt_pairs(
-    df: "pl.DataFrame",
-    align_min: float = 0.70,
-    biclean_min: float = 0.85,
-    bifix_min: float = 0.80,
-    para_win: int = 4,
-    para_stride: int = 2,
-    sent_sample_rate: float = 0.15,
-) -> "pl.DataFrame":
-    """
-    Unpack DocHPLT document-level structure into source/target pairs.
-
-    Input
-    -----
-    Each row is one document: a list of sentence-pair dicts
-        {"src": [str], "tgt": [str], "aligner-score": float,
-         "bicleaner-score": float, "bifixer-score": float}
-
-    Processing
-    ----------
-    1. Per document, keep only sentence pairs that pass all three score thresholds.
-    2. Build paragraph pairs with a sliding window over consecutive kept sentences.
-    3. Sample a fraction of individual sentence pairs from sentences not used
-       in any paragraph window.
-
-    Output
-    ------
-    DataFrame with 'source' and 'target' columns (mix of paragraphs + sentences).
-    """
-    # Find which column holds the list-of-dicts structure
-    doc_col: Optional[str] = None
-    for col in df.columns:
-        sample = df[col][0] if len(df) > 0 else None
-        if isinstance(sample, list):
-            doc_col = col
-            break
-    if doc_col is None:
-        raise ValueError(
-            f"No list-type column found in DocHPLT DataFrame.\n"
-            f"Columns: {df.columns}"
-        )
-
-    para_pairs: list[tuple[str, str]] = []
-    sent_pairs: list[tuple[str, str]] = []
-
-    for doc in df[doc_col].to_list():
-        if not isinstance(doc, list):
-            continue
-
-        # Filter sentence pairs by quality scores
-        good: list[tuple[str, str]] = []
-        for pair in doc:
-            if not isinstance(pair, dict):
-                continue
-            align   = float(pair.get("aligner-score",  0) or 0)
-            biclean = float(pair.get("bicleaner-score", 0) or 0)
-            bifix   = float(pair.get("bifixer-score",   0) or 0)
-            if align >= align_min and biclean >= biclean_min and bifix >= bifix_min:
-                src_list = pair.get("src", [])
-                tgt_list = pair.get("tgt", [])
-                src_text = (src_list[0] if src_list else "").strip()
-                tgt_text = (tgt_list[0] if tgt_list else "").strip()
-                if src_text and tgt_text:
-                    good.append((src_text, tgt_text))
-
-        if not good:
-            continue
-
-        n = len(good)
-        used_idx: set[int] = set()
-
-        # Sliding-window paragraph pairs from consecutive kept sentences
-        if n >= para_win:
-            for pos in range(0, n - para_win + 1, para_stride):
-                window = good[pos : pos + para_win]
-                para_pairs.append((
-                    " ".join(s for s, _ in window),
-                    " ".join(t for _, t in window),
-                ))
-                used_idx.update(range(pos, pos + para_win))
-
-        # Sentence sample from sentences not used in any paragraph window
-        sent_pool = [p for i, p in enumerate(good) if i not in used_idx]
-        if sent_pool and sent_sample_rate > 0:
-            n_take = max(1, int(len(sent_pool) * sent_sample_rate))
-            sent_pairs.extend(random.sample(sent_pool, min(n_take, len(sent_pool))))
-
-    all_pairs = para_pairs + sent_pairs
-    if not all_pairs:
-        return pl.DataFrame({
-            "source": pl.Series([], dtype=pl.Utf8),
-            "target": pl.Series([], dtype=pl.Utf8),
-        })
-
-    print(f"  DocHPLT: {len(para_pairs):,} para + {len(sent_pairs):,} sent  "
-          f"(from {len(df):,} docs)")
-    return pl.DataFrame({
-        "source": [s for s, _ in all_pairs],
-        "target": [t for _, t in all_pairs],
-    })
-
-
-def filter_docholt(
-    df: "pl.DataFrame",
-    lang_pair: str = "en-uk",
-    stats_dir: Optional[Path] = None,
-) -> "pl.DataFrame":
-    """
-    DocHPLT: per-sentence quality columns (aligner ≥ 0.70, bicleaner ≥ 0.85,
-    bifixer ≥ 0.80).  Builds paragraph pairs + sentence sample from documents,
-    then runs pipeline S1 + S2 + S4 + S5 + S7.
-    """
-    from cleaning_pipeline import run_stages
-
-    df_pairs = _build_docholt_pairs(df)
-    return run_stages(
-        df_pairs, lang_pair, stages=[1, 2, 4, 5, 7],
-        dataset=f"docholt_{lang_pair}", stats_dir=stats_dir,
-    )
+    score_fn = lambda s, t: paragraph_quality_score(s, t, "cs-uk", 600, 0.55, 0.25, 0.20)
+    train_df, val_df = split_by_quality(clean, max_train, n_val, score_fn)
+    save_tsv(val_df, val_path)
+    save_tsv(train_df, train_path)
 
 
 # =============================================================================
-# INTERNAL HELPERS
+# CORPUS — ELRC-5179-acts cs-uk (legal text, paragraph-level train + val)
 # =============================================================================
 
-def _unpack_translation(translation_series: "pl.Series") -> "pl.DataFrame":
-    """
-    Convert a Series of translation dicts / Structs into source + target columns.
-    First key → source, second key → target.
-    Handles both pl.Struct dtype (auto-detected) and Python-dict objects.
-    """
-    if hasattr(translation_series.dtype, "fields"):
-        fields = translation_series.struct.fields
-        return pl.DataFrame({
-            "source": translation_series.struct.field(fields[0]),
-            "target": translation_series.struct.field(fields[1]),
-        })
+def build_elrc_cs_uk(
+    out_dir: Optional[Path] = None, val_dir: Optional[Path] = None,
+    max_train: int = 70_000, n_val: int = 100, no_align: bool = False,
+) -> None:
+    train_path = (out_dir or OUT_TRAIN / "cs-uk") / "elrc_acts.tsv"
+    val_path   = (val_dir or OUT_VAL   / "cz-uk") / "elrc_acts.tsv"
 
-    rows = translation_series.to_list()
+    cs_lines, uk_lines, ids_lines = parse_moses_zip(
+        download("https://object.pouta.csc.fi/OPUS-ELRC-5179-acts_Ukrainian/v1/moses/cs-uk.txt.zip"), "cs", "uk",
+    )
+    print(f"  Parsed: {len(cs_lines):,} sentence pairs  "
+          f"(ids: {'found' if ids_lines else 'not found, using consecutive grouping'})")
+    describe_pairs(cs_lines, uk_lines, "Source (cs)", "Target (uk)")
+
+    print("\n── Building paragraphs (2–12 sents, 80–5000 chars) ──")
+    paragraphs = build_paragraphs(cs_lines, uk_lines, ids_lines, 2, 12, 80, 5_000)
+    print(f"  Paragraph pairs (pre-clean): {len(paragraphs):,}")
+    if not paragraphs:
+        print("  [warn] No paragraphs built — check length settings.")
+        return
+
+    stages = [1, 2, 3, 5, 6, 7, 9] + ([] if no_align else [8])
+    pipe   = build_pipeline("cs-uk", stages, near_threshold=0.90, embed_sim_min=0.89)
+    clean  = clean_pairs_in_chunks(paragraphs, pipe, flush_size=5_000)
+    print(f"\n  Post-pipeline: {len(clean):,} pairs")
+    if not len(clean):
+        print("  [warn] No clean pairs produced — check pipeline thresholds.")
+        return
+
+    score_fn = lambda s, t: paragraph_quality_score(s, t, "cs-uk", 700, 0.50, 0.30, 0.20)
+    train_df, val_df = split_by_quality(clean, max_train, n_val, score_fn)
+    save_tsv(val_df, val_path)
+    save_tsv(train_df, train_path)
+
+def build_wikimedia_cs_uk(out_dir: Optional[Path] = None, max_pairs: int = 200_000, no_align: bool = False) -> None:
+    out_path = (out_dir or OUT_TRAIN / "cs-uk") / "wikimedia.tsv"
+
+    cs_lines, uk_lines, _ = parse_moses_zip(
+        download("https://object.pouta.csc.fi/OPUS-wikimedia/v20230407/moses/cs-uk.txt.zip"), "cs", "uk",
+    )
+    print(f"  Parsed: {len(cs_lines):,} raw sentence pairs")
+    describe_pairs(cs_lines, uk_lines, "Source (cs)", "Target (uk)")
+
+    df = pl.DataFrame({"source": cs_lines, "target": uk_lines})
+    n_in = len(df)
+    df = df.filter(
+        pl.col("source").is_not_null() & pl.col("target").is_not_null()
+        & (pl.col("source").str.strip_chars() != "") & (pl.col("target").str.strip_chars() != "")
+        & (pl.col("source").str.len_chars() >= 30) & (pl.col("target").str.len_chars() >= 30)
+        & (pl.col("source").str.split(" ").list.len() >= 5) & (pl.col("target").str.split(" ").list.len() >= 5)
+    )
+    print(f"  Pre-filter (≥5 words, ≥30 chars/side): {n_in:,} → {len(df):,}")
+
+    stages = [1, 2, 3, 4, 5, 6, 7] + ([] if no_align else [8])
+    clean = run_stages(
+        df, "cs-uk", stages=stages, dataset="wikimedia_cs_uk",
+        dedup_near=True, minhash_threshold=0.93,
+        embed_model="intfloat/multilingual-e5-small", embed_sim_min=0.87, embed_batch=512,
+    )
+    print(f"\n  Post-pipeline: {len(clean):,} pairs")
+
+    score_fn = lambda s, t: paragraph_quality_score(s, t, "cs-uk", 400, 0.55, 0.25, 0.20)
+    save_tsv(rank_and_cap(clean, max_pairs, score_fn), out_path)
+
+NLLB_HF_CONFIG        = "ces_Latn-ukr_Cyrl"
+NLLB_RAW_LASER_MIN    = 1.17
+NLLB_LASER_MIN        = 1.17
+NLLB_RAW_LID_SRC_MIN  = 0.95
+NLLB_RAW_LID_TGT_MIN  = 0.98
+NLLB_LID_SRC_MIN, NLLB_LID_SRC_MAX = 0.97, 1.01
+NLLB_LID_TGT_MIN, NLLB_LID_TGT_MAX = 0.99, 1.01
+NLLB_RAW_COLS         = ["source", "target", "laser_score", "source_sentence_lid", "target_sentence_lid"]
+NLLB_STAGES_ROW       = [1, 3, 4, 5, 6, 7, 8]   # pass 1 (chunked): per-row filters
+NLLB_STAGES_DEDUP     = [2]                      # pass 2 (global): exact + near-dedup
+NLLB_DEFAULT_CHUNK    = 500_000
+
+
+def _unpack_translation(series: pl.Series) -> pl.DataFrame:
+    if hasattr(series.dtype, "fields"):
+        fields = series.struct.fields
+        return pl.DataFrame({"source": series.struct.field(fields[0]), "target": series.struct.field(fields[1])})
     sources, targets = [], []
-    for row in rows:
+    for row in series.to_list():
         if isinstance(row, dict):
             vals = list(row.values())
-            sources.append(vals[0] if len(vals) > 0 else None)
+            sources.append(vals[0] if vals else None)
             targets.append(vals[1] if len(vals) > 1 else None)
         else:
             sources.append(None)
@@ -421,199 +370,118 @@ def _unpack_translation(translation_series: "pl.Series") -> "pl.DataFrame":
     return pl.DataFrame({"source": sources, "target": targets})
 
 
-# =============================================================================
-# 3.  SAVE
-# =============================================================================
+def nllb_download_to_raw(raw_path: Path) -> None:
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"  Loading allenai/nllb {NLLB_HF_CONFIG} …")
+    ds    = load_dataset("allenai/nllb", NLLB_HF_CONFIG, verification_mode="no_checks", trust_remote_code=True)
+    split = "train" if "train" in ds else next(iter(ds))
+    df    = pl.from_pandas(ds[split].to_pandas())
+    print(f"  {len(df):,} total rows")
 
-def save_sentence_corpus(df: "pl.DataFrame", out_dir: Path, filename: str) -> None:
-    """Save source/target TSV, dropping any remaining null/empty rows."""
-    df = df.filter(
-        pl.col("source").is_not_null()
-        & pl.col("target").is_not_null()
-        & (pl.col("source").str.strip_chars() != "")
-        & (pl.col("target").str.strip_chars() != "")
-    ).select(["source", "target"])
+    filt = pl.col("laser_score").cast(pl.Float64, strict=False) >= NLLB_RAW_LASER_MIN
+    if "source_sentence_lid" in df.columns:
+        filt = filt & (pl.col("source_sentence_lid").cast(pl.Float64, strict=False) >= NLLB_RAW_LID_SRC_MIN)
+    if "target_sentence_lid" in df.columns:
+        filt = filt & (pl.col("target_sentence_lid").cast(pl.Float64, strict=False) >= NLLB_RAW_LID_TGT_MIN)
+    df = df.filter(filt)
+    print(f"  → {len(df):,} after loose filter (laser ≥ {NLLB_RAW_LASER_MIN})")
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / filename
-    df.write_csv(out_path, separator="\t")
-    print(f"  saved → {out_path}  ({len(df):,} pairs)")
+    text  = _unpack_translation(df["translation"])
+    extra = {c: df[c] for c in NLLB_RAW_COLS[2:] if c in df.columns}
+    raw = pl.DataFrame({"source": text["source"], "target": text["target"], **extra}).filter(
+        pl.col("source").is_not_null() & pl.col("target").is_not_null()
+        & (pl.col("source").str.strip_chars() != "") & (pl.col("target").str.strip_chars() != "")
+    )
+    with gzip.open(raw_path, "wt", encoding="utf-8") as fh:
+        fh.write(raw.write_csv(separator="\t"))
+    print(f"  {len(raw):,} rows saved → {raw_path}")
 
 
-def build_and_save_wmt24pp(
-    df: "pl.DataFrame",
-    out_dir: Path,
-    filename: str,
+def nllb_filter_from_raw(raw_path: Path) -> pl.DataFrame:
+    print(f"  Reading {raw_path} …")
+    df = pl.read_csv(raw_path, separator="\t", quote_char=None, ignore_errors=True)
+    print(f"  {len(df):,} rows in raw")
+
+    df = df.filter(pl.col("laser_score").cast(pl.Float64, strict=False) >= NLLB_LASER_MIN)
+    print(f"  → {len(df):,} after laser_score ≥ {NLLB_LASER_MIN}")
+    if "source_sentence_lid" in df.columns:
+        df = df.filter(pl.col("source_sentence_lid").cast(pl.Float64, strict=False)
+                       .is_between(NLLB_LID_SRC_MIN, NLLB_LID_SRC_MAX))
+    if "target_sentence_lid" in df.columns:
+        df = df.filter(pl.col("target_sentence_lid").cast(pl.Float64, strict=False)
+                       .is_between(NLLB_LID_TGT_MIN, NLLB_LID_TGT_MAX))
+    print(f"  → {len(df):,} after LID bounds")
+
+    return df.select(["source", "target"]).filter(
+        pl.col("source").is_not_null() & pl.col("target").is_not_null()
+        & (pl.col("source").str.strip_chars() != "") & (pl.col("target").str.strip_chars() != "")
+    )
+
+
+def build_nllb(
+    out_dir: Optional[Path] = None, raw_dir: Optional[Path] = None,
+    mode: str = "all", clean_chunk: int = NLLB_DEFAULT_CHUNK,
 ) -> None:
-    """
-    Build a mixed sentence+paragraph corpus from WMT24PP.
-    Requires columns: document_id, segment_id, domain, source, target.
+    raw_path = (raw_dir or RAW_DIR / "nllb") / "nllb_cs-uk_raw.tsv.gz"
+    out_path = (out_dir or OUT_TRAIN / "cs-uk") / "nllb.tsv"
 
-    Steps
-    -----
-    a) Sliding-window paragraph blocks per document (domain-specific window/stride).
-    b) Exclude paragraph-used segments from sentence pool.
-    c) Stratified-sample sentences by domain (SENTENCE_SAMPLE_RATE).
-    d) Mix to SENTENCE_RATIO, shuffle, save TSV.
-    """
-    pdf: pd.DataFrame = df.to_pandas().reset_index(drop=True)
+    if mode in ("download", "all", "download+clean"):
+        print("\n=== download → raw ===")
+        nllb_download_to_raw(raw_path)
 
-    para_records: list[dict[str, str]] = []
-    used_indices: set[int] = set()
+    if mode in ("clean", "all", "download+clean"):
+        if not raw_path.exists():
+            raise FileNotFoundError(
+                f"Raw file not found: {raw_path}\n"
+                "Run first:  python scripts/loader.py nllb --mode download"
+            )
+        print("\n=== filter from raw ===")
+        filtered = nllb_filter_from_raw(raw_path)
+        total    = len(filtered)
 
-    for _doc_id, group in pdf.groupby("document_id"):
-        group  = group.sort_values("segment_id")
-        domain = group["domain"].iloc[0]
-        if domain not in PARAGRAPH_CFG:
-            continue
-        size, stride = PARAGRAPH_CFG[domain]
-        n = len(group)
-        if n < size:
-            continue
-        seen_starts: set[int] = set()
-        for pos in range(0, n - size + 1, stride):
-            if pos in seen_starts:
-                continue
-            seen_starts.add(pos)
-            window = group.iloc[pos : pos + size]
-            para_records.append({
-                "source": " ".join(window["source"].tolist()),
-                "target": " ".join(window["target"].tolist()),
-            })
-            used_indices.update(window.index.tolist())
+        print(f"\n=== clean → training TSV  ({total:,} pairs) ===")
+        pipe  = build_pipeline("cs-uk", NLLB_STAGES_ROW)
+        pairs = list(zip(filtered["source"].to_list(), filtered["target"].to_list()))
+        chunk = clean_chunk if 0 < clean_chunk < total else max(total, 1)
+        after_pass1 = clean_pairs_in_chunks(pairs, pipe, chunk)
+        print(f"  after pass 1: {total:,} → {len(after_pass1):,}")
 
-    paragraphs = pd.DataFrame(para_records, columns=["source", "target"])
+        print(f"  pass 2 (global dedup): rows={len(after_pass1):,}")
+        final = run_stages(after_pass1, "cs-uk", stages=NLLB_STAGES_DEDUP, dataset="nllb_cs-uk_dedup")
+        save_tsv(final, out_path)
 
-    eligible   = pdf[~pdf.index.isin(used_indices)]
-    sent_parts: list[pd.DataFrame] = []
-    for _domain, grp in eligible.groupby("domain"):
-        sent_parts.append(
-            grp.sample(frac=SENTENCE_SAMPLE_RATE, random_state=SEED)[["source", "target"]]
-        )
-    sentences = (
-        pd.concat(sent_parts, ignore_index=True)
-        if sent_parts
-        else pd.DataFrame(columns=["source", "target"])
-    )
-
-    n_para        = len(paragraphs)
-    n_sent_target = int(n_para * SENTENCE_RATIO / (1 - SENTENCE_RATIO))
-    n_sent        = min(n_sent_target, len(sentences))
-    if n_sent > 0:
-        sentences = sentences.sample(n=n_sent, random_state=SEED)
-
-    combined = (
-        pd.concat([sentences, paragraphs], ignore_index=True)
-        .sample(frac=1, random_state=SEED)
-        .reset_index(drop=True)
-    )
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / filename
-    combined[["source", "target"]].to_csv(out_path, sep="\t", index=False)
-
-    pct = n_sent / len(combined) * 100 if len(combined) else 0
-    print(
-        f"  saved → {out_path}\n"
-        f"  total={len(combined):,}  sent={n_sent:,} ({pct:.1f}%)  "
-        f"para={n_para:,} ({100-pct:.1f}%)"
-    )
-
-
-# =============================================================================
-# 4.  MAIN  —  load → filter+clean → save
-# =============================================================================
+CORPUS_BUILDERS = {
+    "eubookshop_cs_uk": build_eubookshop_cs_uk,
+    "elrc_cs_uk":        build_elrc_cs_uk,
+    "wikimedia_cs_uk":   build_wikimedia_cs_uk,
+    "nllb":              build_nllb,
+}
 
 if __name__ == "__main__":
+    import argparse
 
-    STATS_DIR = DATA_DIR / "stats"
+    parser = argparse.ArgumentParser(description="Build a cs-uk MT training/validation corpus (single entry point).")
+    parser.add_argument("corpus", choices=sorted(CORPUS_BUILDERS))
+    parser.add_argument("--out-dir", type=Path)
+    parser.add_argument("--val-dir", type=Path, help="eubookshop_cs_uk / elrc_cs_uk")
+    parser.add_argument("--max-train", type=int, help="eubookshop_cs_uk / elrc_cs_uk")
+    parser.add_argument("--n-val", type=int, help="eubookshop_cs_uk / elrc_cs_uk")
+    parser.add_argument("--max-pairs", type=int, help="wikimedia_cs_uk")
+    parser.add_argument("--no-align", action="store_true", help="skip the semantic-alignment stage")
+    parser.add_argument("--mode", help="nllb: download/clean/download+clean/all")
+    parser.add_argument("--raw-dir", type=Path, help="nllb: raw cache directory")
+    parser.add_argument("--clean-chunk", type=int, help="nllb: rows per pass-1 chunk (0 = no chunking)")
+    args = parser.parse_args()
 
-    # ── en-uk training ────────────────────────────────────────────────────────
-    # MaCoCu: run separately via  python scripts/corpus/macocu.py
-    # NLLB:   run separately via  python scripts/corpus/nllb.py --lang-pair en-uk
+    kwargs = {}
+    if args.out_dir is not None:    kwargs["out_dir"] = args.out_dir
+    if args.val_dir is not None:    kwargs["val_dir"] = args.val_dir
+    if args.max_train is not None:  kwargs["max_train"] = args.max_train
+    if args.n_val is not None:      kwargs["n_val"] = args.n_val
+    if args.max_pairs is not None:  kwargs["max_pairs"] = args.max_pairs
+    if args.no_align:               kwargs["no_align"] = True
+    if args.mode is not None:       kwargs["mode"] = args.mode
+    if args.raw_dir is not None:    kwargs["raw_dir"] = args.raw_dir
+    if args.clean_chunk is not None: kwargs["clean_chunk"] = args.clean_chunk
 
-    print("\n=== OpenSubtitles en-uk ===")
-    save_sentence_corpus(
-        filter_open_subtitles(
-            load_opus_moses(
-                "https://object.pouta.csc.fi/OPUS-OpenSubtitles/v2018/moses/en-uk.txt.zip",
-                src_lang="en",
-            ),
-            lang_pair="en-uk", stats_dir=STATS_DIR / "en-uk",
-        ),
-        OUT_TRAIN / "en-uk", "open_subtitles.tsv",
-    )
-
-    print("\n=== ParaCrawl en-uk ===")
-    save_sentence_corpus(
-        filter_paracrawl(
-            load_opus_moses(
-                "https://object.pouta.csc.fi/OPUS-ParaCrawl-Bonus/v9/moses/en-uk.txt.zip",
-                src_lang="en",
-            ),
-            lang_pair="en-uk", stats_dir=STATS_DIR / "en-uk",
-        ),
-        OUT_TRAIN / "en-uk", "paracrawl.tsv",
-    )
-
-    print("\n=== DocHPLT en-uk ===")
-    save_sentence_corpus(
-        filter_docholt(load_huggingface("HPLT/DocHPLT", "en-uk"),
-                       lang_pair="en-uk", stats_dir=STATS_DIR / "en-uk"),
-        OUT_TRAIN / "en-uk", "docholt.tsv",
-    )
-
-    # ── cs-uk training ────────────────────────────────────────────────────────
-    # NLLB:   run separately via  python scripts/corpus/nllb.py --lang-pair cs-uk
-
-    print("\n=== OpenSubtitles cs-uk ===")
-    save_sentence_corpus(
-        filter_open_subtitles(
-            load_opus_moses(
-                "https://object.pouta.csc.fi/OPUS-OpenSubtitles/v2018/moses/cs-uk.txt.zip",
-                src_lang="cs",
-            ),
-            lang_pair="cs-uk", stats_dir=STATS_DIR / "cs-uk",
-        ),
-        OUT_TRAIN / "cs-uk", "open_subtitles.tsv",
-    )
-
-    # ── en-uk validation ──────────────────────────────────────────────────────
-
-    print("\n=== WMT24++ en-uk validation ===")
-    build_and_save_wmt24pp(
-        filter_wmt24pp(load_huggingface("google/wmt24pp", "en-uk")),
-        OUT_VAL / "en-uk", "wmt24pp.tsv",
-    )
-
-    print("\n=== TildeMODEL en-uk validation ===")
-    save_sentence_corpus(
-        filter_tilde(
-            load_opus_moses(
-                "https://object.pouta.csc.fi/OPUS-TildeMODEL/v2018/moses/en-uk.txt.zip",
-                src_lang="en",
-            ),
-            lang_pair="en-uk", stats_dir=STATS_DIR / "en-uk",
-        ),
-        OUT_VAL / "en-uk", "tilde.tsv",
-    )
-
-    print("\n=== OpenSubtitles en-uk validation ===")
-    save_sentence_corpus(
-        filter_open_subtitles(
-            load_huggingface("Helsinki-NLP/OpenSubtitles2024", "en-uk", split="validation"),
-            lang_pair="en-uk", stats_dir=STATS_DIR / "en-uk",
-        ),
-        OUT_VAL / "en-uk", "open_subtitles_en.tsv",
-    )
-
-    # ── cs-uk validation ──────────────────────────────────────────────────────
-
-    print("\n=== OpenSubtitles cs-uk validation ===")
-    save_sentence_corpus(
-        filter_open_subtitles(
-            load_huggingface("Helsinki-NLP/OpenSubtitles2024", "cs-uk", split="validation"),
-            lang_pair="cs-uk", stats_dir=STATS_DIR / "cs-uk",
-        ),
-        OUT_VAL / "cs-uk", "open_subtitles_cs.tsv",
-    )
+    CORPUS_BUILDERS[args.corpus](**kwargs)
