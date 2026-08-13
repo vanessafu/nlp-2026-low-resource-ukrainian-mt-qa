@@ -1,7 +1,28 @@
+# Data: keep the directory skeleton, never commit real corpora.
+data/**
+prepared/**
+train_data/**
+# !data/
+# !data/**/
+# !data/**/.gitkeep
+# !data/**/README.md
+# !data/**/*.md
+
+
+# Training artifacts
 # Data & artifacts (obtain via scripts/download_all_data.sh)
 train_data/
 llms-limited-resources2026/
 outputs/
+runs/
+logs/
+checkpoints/
+models/
+wandb/
+mlruns/
+
+# Jobs
+jobs/
 version*/
 
 # Secrets
@@ -14,10 +35,40 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+env/
+venv_wmt26/
+.local/
+.pydeps/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+
+# OS and editor files
 .env
 
 # IDE / OS
 .idea/
 .vscode/
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+
+
 *.log

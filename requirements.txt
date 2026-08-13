@@ -1,3 +1,35 @@
+# ── Core data processing ──────────────────────────────────────────────────────
+polars>=0.20.0
+pyarrow>=14.0.0
+
+# ── HuggingFace ───────────────────────────────────────────────────────────────
+datasets>=2.14.0
+transformers>=4.35.0
+accelerate>=0.24.0
+
+# ── HTTP / download ───────────────────────────────────────────────────────────
+requests>=2.31.0
+
+# ── HTML parsing (ZNO/NMT dataset extraction) ─────────────────────────────────
+beautifulsoup4>=4.12.0
+# curl must be available as a system binary (used for MaCoCu download)
+
+# ── Near-dedup (Stage 2) ──────────────────────────────────────────────────────
+datasketch>=1.6.5   # preferred LSH; falls back to built-in MinHash if missing
+mmh3>=4.0.0         # fast Murmur3 hashing; falls back to hashlib if missing
+
+# ── Language identification (Stage 3) ─────────────────────────────────────────
+fasttext-langdetect>=1.0.6   # lid.176.bin auto-downloaded on first run
+
+# ── Semantic alignment (Stage 8) ──────────────────────────────────────────────
+# torch is NOT listed here — use the version pre-installed in the container
+# (nvcr.io/nvidia/pytorch:23.10-py3 ships PyTorch 2.1 + CUDA 12.2).
+# Installing torch via pip inside the container overwrites the container's
+# NCCL-linked build and causes "undefined symbol: ncclCommWindowDeregister".
+sentence-transformers>=2.3.0
+
+# ── QE scoring (Stage 9, optional) ────────────────────────────────────────────
+# pymarian  — install from source: https://github.com/marian-nmt/pymarian
 torch>=2.1.0
 transformers>=4.51.0
 peft>=0.14.0
