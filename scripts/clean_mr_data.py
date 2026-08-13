@@ -10,9 +10,12 @@ outpus:
 import json
 import re
 from fractions import Fraction
-GSM8K_PATH = "../train_data/MR/gsm8k_train.jsonl"
-COMP_PATH  = "../train_data/MR/competition_math_train.jsonl"
-OUT_PATH   = "../train_data/MR/mr_train.jsonl"
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+GSM8K_PATH = ROOT / "train_data" / "MR" / "gsm8k_train.jsonl"
+COMP_PATH  = ROOT / "train_data" / "MR" / "competition_math_train.jsonl"
+OUT_PATH   = ROOT / "train_data" / "MR" / "mr_train.jsonl"
 SYSTEM_EN = ("You are a mathematics assistant. Solve the problem with a short "
              "step-by-step solution in Ukrainian (a few concise steps, no "
              "repetition). Use fractions instead of decimals. At the end, write "

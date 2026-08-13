@@ -50,8 +50,9 @@ Dev data: [TUM-NLP/llms-limited-resources2026](https://github.com/TUM-NLP/llms-l
 | `train_data/SC/mmlu_ukr_sc_train.jsonl` | SC | `prepare_mmlu_ukr_sc.py` |
 | `train_data/QA/mmlu_en_train.jsonl` | QA (en→uk) | `translate_train_en_uk.py` |
 | `train_data/QA/mmlu_ukr/data/*.parquet` | QA (uk) | `download_qa_mmlu.sh` |
-| `train_data/MR/gsm8k_train.jsonl` | MR | `prepare_mr_data.py` |
-| `train_data/MR/competition_math_train.jsonl` | MR | `download_competition_math.sh` |
+| `train_data/MR/gsm8k_train.jsonl` | MR | `prepare_mr_data.py` (+ `translate_train_en_uk.py` for `_uk` fields) |
+| `train_data/MR/competition_math_train.jsonl` | MR | `download_competition_math.sh` (+ `translate_train_en_uk.py` for `_uk` fields) |
+| `train_data/MR/mr_train.jsonl` | MR, cleaned/boxed format (not yet consumed by trainers) | `clean_mr_data.py` |
 
 ---
 
@@ -83,6 +84,23 @@ Or Google Cloud Translation API:
 bash scripts/install_google_credentials.sh /path/to/service-account.json
 bash scripts/run_translate_en_uk.sh
 ```
+
+This adds `question_uk`/`answer_uk` fields directly into
+`train_data/MR/gsm8k_train.jsonl` and `train_data/MR/competition_math_train.jsonl`.
+
+Then clean/normalize the MR pair into the boxed-answer chat format (decimals →
+fractions, `\boxed{}` unwrapped in the body, final answer restated at the end):
+
+```bash
+python3 scripts/clean_mr_data.py
+```
+
+Writes `train_data/MR/mr_train.jsonl`. **Note:** this output is not yet wired
+into `finetune_stage2_qa_mr.py` / `finetune_mr_only.py`, which currently train
+directly off `question_uk`/`answer_uk` in the raw `gsm8k_train.jsonl` /
+`competition_math_train.jsonl` files (see `build_mr_ukr_messages` in
+`lora_train_utils.py`). Point a trainer at `mr_train.jsonl` explicitly if you
+want to train on the cleaned format.
 
 ### 4. Place MT training data
 
