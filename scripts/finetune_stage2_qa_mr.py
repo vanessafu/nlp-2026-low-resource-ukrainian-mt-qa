@@ -19,20 +19,12 @@ def main():
     parser.add_argument("--grad-accum", type=int, default=8)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--max-seq-length", type=int, default=2048)
-    parser.add_argument("--mmlu-en", type=Path, default=ROOT / "train_data/QA/mmlu_en_train.jsonl")
-    parser.add_argument(
-        "--mmlu-ukr",
-        type=Path,
-        default=ROOT / "train_data/QA/mmlu_ukr/data/validation-00000-of-00001.parquet",
-    )
-    parser.add_argument("--gsm8k", type=Path, default=ROOT / "train_data/MR/gsm8k_train.jsonl")
-    parser.add_argument("--comp-math", type=Path, default=ROOT / "train_data/MR/competition_math_train.jsonl")
+    parser.add_argument("--qa-merged", type=Path, default=ROOT / "train_data/QA/train_merged.jsonl")
+    parser.add_argument("--mr", type=Path, default=ROOT / "train_data/MR/mr_train.jsonl")
     args = parser.parse_args()
 
     model, tokenizer = load_model_and_tokenizer(args.model, lora_path=args.stage1_lora)
-    dataset = build_stage2_dataset(
-        tokenizer, args.mmlu_en, args.mmlu_ukr, [args.gsm8k, args.comp_math]
-    )
+    dataset = build_stage2_dataset(tokenizer, args.qa_merged, args.mr)
     run_sft(
         model,
         tokenizer,
