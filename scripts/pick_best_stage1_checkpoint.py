@@ -16,9 +16,13 @@ def score_stage1(summary: dict) -> float:
     gc = summary.get("GC", {})
     sc = summary.get("SC", {})
     bleu = mt.get("BLEU", 0) / 100.0
-    gc_pair = gc.get("pair_accuracy", 0)
-    sc_pair = sc.get("pair_accuracy", 0)
-    return bleu + gc_pair + sc_pair
+    gc_score = (
+        gc.get("detection_accuracy", 0) + gc.get("correction_accuracy", 0)
+    ) / 2
+    sc_score = (
+        sc.get("detection_accuracy", 0) + sc.get("correction_accuracy", 0)
+    ) / 2
+    return bleu + gc_score + sc_score
 
 
 def main():

@@ -8,7 +8,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lora_train_utils import ROOT, load_model_and_tokenizer, load_mr_ukr_dataset, run_sft
+from lora_train_utils import (
+    DEFAULT_MAX_SEQ_LENGTH,
+    ROOT,
+    load_model_and_tokenizer,
+    load_mr_ukr_dataset,
+    run_sft,
+)
 
 
 def main():
@@ -25,7 +31,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--grad-accum", type=int, default=8)
     parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--max-seq-length", type=int, default=2048)
+    parser.add_argument("--max-seq-length", type=int, default=DEFAULT_MAX_SEQ_LENGTH)
     parser.add_argument("--gsm8k", type=Path, default=ROOT / "train_data/MR/gsm8k_train.jsonl")
     parser.add_argument("--comp-math", type=Path, default=ROOT / "train_data/MR/competition_math_train.jsonl")
     parser.add_argument("--eval-after", action="store_true", help="Run MR dev eval when training finishes")

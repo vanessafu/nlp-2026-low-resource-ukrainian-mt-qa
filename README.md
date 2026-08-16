@@ -1,10 +1,63 @@
-# WMT2026 Low-Resource Ukrainian — Data, Two-Stage LoRA Training & Evaluation
+# WMT2026 Low-Resource Ukrainian — Two-Stage LoRA Training & Evaluation
 
-Two-stage LoRA fine-tuning pipeline for **Qwen/Qwen3.5-2B** on the WMT2026 Ukrainian shared task (MT, QA, SC, GC, MR).
+Two-stage LoRA fine-tuning pipeline for **Qwen/Qwen3.5-2B** on the WMT2026 Ukrainian shared task (MT, MT_CS, QA, SC, GC, MR).
 
-Base model: [Qwen/Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B)
+| | |
+|--|--|
+| **Team** | Zolint |
+| **Institution** | UTokyo & TUM |
+| **Base model** | [Qwen/Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B) |
+| **Released LoRA** | [MDK-YLC/Qwen3.5-2B-WMT26-Ukrainian-LoRA](https://huggingface.co/MDK-YLC/Qwen3.5-2B-WMT26-Ukrainian-LoRA) |
+| **Dev data** | [TUM-NLP/llms-limited-resources2026](https://github.com/TUM-NLP/llms-limited-resources2026) (Ukrainian track) |
 
-Dev data: [TUM-NLP/llms-limited-resources2026](https://github.com/TUM-NLP/llms-limited-resources2026) (Ukrainian track)
+---
+
+## Canonical training recipe (best)
+
+1. **Stage 1** (5 epochs, LoRA r=16): MT (en→uk) + GC + SC  
+   → pick best by dev MT+GC+SC (typically `checkpoint-3931`, epoch 1)
+2. **Stage 2** (1 epoch): QA + MR + anti-forgetting replay  
+   - 5k MT (en→uk)  
+   - 5k GC  
+   - full CS→UK (`train.cs-uk.jsonl.gz`, 16946 examples)  
+   - QA (translated MMLU-en + mmlu_ukr + ZNO train)  
+   - MR (gsm8k + competition_math, Ukrainian)
+3. **TEST inference** → official `Ukrainian/` submission JSONL layout
+
+### Recommended one-shot (Stage2 from existing Stage1 best + test + submission)
+
+```bash
+# Requires Stage-1 best at outputs/stage1_mt_gc_sc_lora/checkpoint-3931
+# and train.cs-uk.jsonl.gz in repo root (or set MT_CS_PATH)
+bash scripts/run_stage2_csuk_new_then_test_tmux.sh
+# monitor:
+tail -f outputs/stage2_csuk_new.log
+```
+
+Outputs:
+
+| Path | Content |
+|------|---------|
+| `outputs/stage2_csuk_new_lora/` | Stage-2 LoRA (final adapter) |
+| `outputs/stage2_csuk_new_test_preds/` | raw test preds |
+| `Ukrainian_csuk_new/` | submission folder |
+| `Ukrainian_csuk_new_submission.zip` | zipped submission |
+
+### Full two-stage from scratch
+
+```bash
+bash scripts/run_two_stage_tmux.sh
+# or: bash scripts/train_two_stage.sh
+```
+
+This runs Stage1 → pick best → Stage2 via `run_stage2_ukr_mix_cs.sh` (first 10k CS-UK from version-1 corpus by default).
+
+### Canonical Stage2 only (old CS-UK source)
+
+```bash
+STAGE1_LORA=outputs/stage1_mt_gc_sc_lora/checkpoint-3931 \
+  bash scripts/run_stage2_ukr_mix_cs.sh
+```
 
 ---
 
@@ -14,133 +67,75 @@ Dev data: [TUM-NLP/llms-limited-resources2026](https://github.com/TUM-NLP/llms-l
 .
 ├── README.md
 ├── requirements.txt
-├── eval_qwen35_ukrainian_zeroshot.py   # Dev evaluation (all 5 tasks)
-├── config/
-│   └── .gitignore                      # Keeps credentials out of git
+├── eval_qwen35_ukrainian_zeroshot.py   # Dev evaluation
 ├── scripts/
-│   ├── download_all_data.sh            # Master: download + prepare training data
-│   ├── download_dev_data.sh            # Clone Ukrainian dev sets
-│   ├── download_qa_mmlu.sh           # MMLU en + ukr from HuggingFace
-│   ├── download_competition_math.sh    # Hendrycks MATH + export jsonl
-│   ├── prepare_mr_data.py              # GSM8K + competition_math → jsonl
-│   ├── prepare_ua_gec_gc.py            # UA-GEC → GC training jsonl
-│   ├── prepare_mmlu_ukr_sc.py          # Synthetic SC from mmlu_ukr
-│   ├── translate_train_en_uk.py        # Translate QA/MR en→uk (Stage 2)
-│   ├── run_translate_en_uk.sh          # Run translation with Google Cloud API
-│   ├── install_google_credentials.sh   # Install service-account JSON
-│   ├── train_two_stage.sh              # Full pipeline: Stage1 → pick ckpt → Stage2 → eval
-│   ├── run_two_stage_tmux.sh           # Run train_two_stage.sh in tmux
-│   ├── monitor_two_stage.sh            # Hourly progress log
+│   ├── lora_train_utils.py             # Shared dataset / LoRA / SFT helpers
 │   ├── finetune_stage1_mt_gc_sc.py     # Stage 1: MT + GC + SC
-│   ├── finetune_stage2_qa_mr.py        # Stage 2: QA + MR (from best Stage-1 ckpt)
-│   ├── finetune_mr_only.py             # Optional: MR-only Ukrainian retrain
-│   ├── pick_best_stage1_checkpoint.py    # Pick best Stage-1 by dev MT+GC+SC
-│   └── lora_train_utils.py             # Shared dataset / LoRA / SFT helpers
-├── train_data/                         # Created by download scripts (gitignored)
-├── llms-limited-resources2026/         # Dev eval data (gitignored)
-└── outputs/                            # Checkpoints & eval results (gitignored)
+│   ├── finetune_stage2_qa_mr_ukr_mix.py# Stage 2: QA+MR+MT/GC/MT_CS mix
+│   ├── pick_best_stage1_checkpoint.py
+│   ├── pick_best_stage2_checkpoint.py
+│   ├── run_stage2_ukr_mix_cs.sh        # Canonical Stage2 + pick + dev eval
+│   ├── run_stage2_csuk_new_then_test.sh# Best Stage2 (full cs-uk) + TEST + submit
+│   ├── infer_ukrainian_test.py         # Official test inference
+│   ├── export_ukrainian_submission.py  # Preds → Ukrainian/*.jsonl (+ zip)
+│   ├── train_two_stage.sh              # Full Stage1→Stage2 pipeline
+│   └── ...                             # data prep / ablations
+├── train_data/                         # gitignored
+├── llms-limited-resources2026/         # gitignored (dev/test)
+└── outputs/                            # gitignored
 ```
-
-### Expected `train_data/` after preparation
-
-| Path | Task | Source script |
-|------|------|---------------|
-| `train_data/data/pseudo_docs/train_pseudo_en_uk.jsonl` | MT (Stage 1 default) | Place manually or use version-1 corpus |
-| `train_data/GC/ua_gec_train_single_error.jsonl` | GC | `prepare_ua_gec_gc.py` |
-| `train_data/SC/mmlu_ukr_sc_train.jsonl` | SC | `prepare_mmlu_ukr_sc.py` |
-| `train_data/QA/mmlu_en_train.jsonl` | QA (en→uk) | `translate_train_en_uk.py` |
-| `train_data/QA/mmlu_ukr/data/*.parquet` | QA (uk) | `download_qa_mmlu.sh` |
-| `train_data/MR/gsm8k_train.jsonl` | MR | `prepare_mr_data.py` (+ `translate_train_en_uk.py` for `_uk` fields) |
-| `train_data/MR/competition_math_train.jsonl` | MR | `download_competition_math.sh` (+ `translate_train_en_uk.py` for `_uk` fields) |
-| `train_data/MR/mr_train.jsonl` | MR, cleaned/boxed format (not yet consumed by trainers) | `clean_mr_data.py` |
 
 ---
 
 ## Quick start
 
-### 1. Install dependencies
+### 1. Install
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Download & prepare data
+### 2. Prepare data
 
 ```bash
 bash scripts/download_all_data.sh
-```
-
-### 3. (Optional) Translate QA/MR to Ukrainian for Stage 2
-
-Free backend (no API key):
-
-```bash
+# Optional: translate QA/MR to Ukrainian
 python3 scripts/translate_train_en_uk.py --backend free --limit-qa 20000
 ```
 
-Or Google Cloud Translation API:
+Place / download:
 
-```bash
-bash scripts/install_google_credentials.sh /path/to/service-account.json
-bash scripts/run_translate_en_uk.sh
-```
+- `train_data/data/pseudo_docs/train_pseudo_en_uk.jsonl` (MT en→uk)
+- `train.cs-uk.jsonl.gz` (CS→UK chat messages; used by best Stage2)
+- Dev/test under `llms-limited-resources2026/Ukrainian/`
 
-This adds `question_uk`/`answer_uk` fields directly into
-`train_data/MR/gsm8k_train.jsonl` and `train_data/MR/competition_math_train.jsonl`.
+### 3. Train + evaluate / submit
 
-Then clean/normalize the MR pair into the boxed-answer chat format (decimals →
-fractions, `\boxed{}` unwrapped in the body, final answer restated at the end):
+See **Canonical training recipe** above.
 
-```bash
-python3 scripts/clean_mr_data.py
-```
-
-Writes `train_data/MR/mr_train.jsonl`. **Note:** this output is not yet wired
-into `finetune_stage2_qa_mr.py` / `finetune_mr_only.py`, which currently train
-directly off `question_uk`/`answer_uk` in the raw `gsm8k_train.jsonl` /
-`competition_math_train.jsonl` files (see `build_mr_ukr_messages` in
-`lora_train_utils.py`). Point a trainer at `mr_train.jsonl` explicitly if you
-want to train on the cleaned format.
-
-### 4. Place MT training data
-
-Default Stage 1 expects English→Ukrainian parallel jsonl at:
-
-`train_data/data/pseudo_docs/train_pseudo_en_uk.jsonl`
-
-Alternatively, use the shared-task version-1 combined corpus:
-
-```bash
-python3 scripts/finetune_stage1_mt_gc_sc.py \
-  --mt "version 1/train.jsonl.gz" \
-  --mt-format version1 \
-  --mt-lang-pairs en-uk,cs-uk
-```
-
-### 5. Two-stage training + evaluation
-
-```bash
-bash scripts/train_two_stage.sh
-# or in tmux:
-bash scripts/run_two_stage_tmux.sh
-```
-
-Pipeline:
-
-1. **Stage 1** (5 epochs): MT + GC + SC interleaved 1:1:1 → `outputs/stage1_mt_gc_sc_lora/`
-2. **Pick best checkpoint** by dev MT + GC + SC → `outputs/stage1_best_checkpoint.json`
-3. **Stage 2** (5 epochs): QA + MR from best Stage-1 LoRA → `outputs/stage2_qa_mr_lora/`
-4. **Final eval** on all 5 dev tasks → `outputs/stage2_final_dev_eval/summary.json`
-
-### 6. Standalone evaluation
+### 4. Standalone dev eval
 
 ```bash
 python3 eval_qwen35_ukrainian_zeroshot.py \
   --model Qwen/Qwen3.5-2B \
-  --lora-path outputs/stage2_qa_mr_lora \
+  --lora-path outputs/stage2_csuk_new_lora \
   --output-dir outputs/my_eval \
   --force \
   --tasks MT,MT_CS,QA,SC,GC,MR
+```
+
+### 5. Test inference + submission export
+
+```bash
+LORA_PATH=outputs/stage2_csuk_new_lora \
+  OUT_DIR=outputs/my_test_preds \
+  FORCE=1 \
+  bash scripts/run_stage2_ukr_test_infer.sh
+
+python3 scripts/export_ukrainian_submission.py \
+  --pred-dir outputs/my_test_preds \
+  --out-dir Ukrainian \
+  --zip-path Ukrainian_submission.zip
 ```
 
 ---
@@ -149,24 +144,42 @@ python3 eval_qwen35_ukrainian_zeroshot.py \
 
 | Parameter | Value |
 |-----------|-------|
-| LoRA r / alpha | 16 / 32 |
+| LoRA r / alpha | 16 / 32 (canonical best) |
 | Learning rate | 2e-4 |
-| Batch size × grad accum | 4 × 8 = 32 effective |
-| Max sequence length | 2048 |
-| Epochs per stage | 5 |
+| Batch × grad accum | 4 × 8 = 32 effective |
+| Max sequence length | 3072 |
+| Stage 1 epochs | 5 (best ckpt usually epoch 1) |
+| Stage 2 epochs | 1 |
+
+Ablations with r=32 / 1+1 or 2+2 epochs: `scripts/train_two_stage_{1,2}ep_r32.sh`.
 
 ---
 
-## Reference results (dev)
+## Reference results (dev, Stage1 best)
 
-Best Stage-1 checkpoint: `checkpoint-3931` (epoch 1, score = BLEU/100 + GC_pair + SC_pair).
+Stage-1 best: `outputs/stage1_mt_gc_sc_lora/checkpoint-3931`
 
-| Task | Metric | Stage-2 final |
-|------|--------|---------------|
-| MT | BLEU / chrF2 | 18.13 / 46.69 |
-| QA | accuracy | 30.4% |
-| SC | pair accuracy | 50.0% |
-| GC | pair accuracy | 48.3% |
-| MR | accuracy | 0% (see `finetune_mr_only.py` for Ukrainian MR fix) |
+| Task | Metric | Zeroshot | Stage1 best |
+|------|--------|----------|-------------|
+| MT | BLEU | 15.40 | **17.92** |
+| GC | det / corr | 34.2% / 32.4% | **42.5% / 42.1%** |
+| SC | det / corr | 32.5% / 30.6% | **75.2% / 59.3%** |
 
-Zeroshot baseline: `outputs/qwen3_5_2b_ukrainian_zeroshot/summary.json` (run eval without `--lora-path`).
+After Stage2 (canonical mix+cs, `checkpoint-1843`):
+
+| Task | Metric | Score |
+|------|--------|-------|
+| MT | BLEU | 18.72 |
+| MT_CS | BLEU | 21.45 |
+| QA | accuracy | 38.2% |
+| SC | det / corr | 76.1% / 61.4% |
+| GC | det / corr | 38.2% / 37.8% |
+| MR | accuracy | 25.0% |
+
+Released HF LoRA matches the stronger Stage2 run trained with **full** `train.cs-uk.jsonl.gz` (16946 rows).
+
+---
+
+## License
+
+MIT

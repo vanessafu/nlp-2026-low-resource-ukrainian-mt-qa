@@ -1,13 +1,13 @@
 import argparse
 import json
-import math
 import re
 from pathlib import Path
 
-import sacrebleu
 import torch
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from evaluation import accuracy_score, compute_bleu_chrfpp, maths_reasoning_evaluation
 
 
 ROOT = Path("llms-limited-resources2026/Ukrainian")
@@ -88,7 +88,10 @@ def build_examples():
                     "role": "system",
                     "content": "You are a Ukrainian exam assistant. Answer the multiple choice question.",
                 },
-                {"role": "user", "content": f"{row['question']}\n\n{format_options(row['possible_answers'])}\n\nAnswer:"},
+                {
+                    "role": "user",
+                    "content": f"{row['question']}\n\n{format_options(row['possible_answers'])}\n\nAnswer:",
+                },
             ],
             "reference": str(row["correct_answer_num"]),
             "possible_answers": row["possible_answers"],
@@ -151,7 +154,8 @@ def build_examples():
                     "role": "system",
                     "content": (
                         "You are a mathematics assistant. "
-                        "Solve the problem step by step and select the correct answer."
+                        "Show your step-by-step solution, "
+                        "then give the final answer after 'Answer:'."
                     ),
                 },
                 {"role": "user", "content": f"{row['question']}\n\nAnswer:"},
@@ -200,7 +204,7 @@ def generate_task(model, tokenizer, task, examples, batch_size, max_new_tokens, 
             return_tensors="pt",
             padding=True,
             truncation=True,
-            max_length=4096,
+            max_length=5120,
         ).to(model.device)
         outputs = model.generate(
             **inputs,
@@ -266,71 +270,93 @@ def parse_error_pair(prediction):
     return None, None
 
 
-def parse_number(prediction):
+def extract_mr_final_answer(prediction: str) -> str:
     text = strip_thinking(prediction)
-    matches = re.findall(r"-?\d+(?:[.,]\d+)?", text.replace(" ", ""))
-    if not matches:
-        return None
-    value = matches[-1].replace(",", ".")
-    try:
-        number = float(value)
-    except ValueError:
-        return None
-    if math.isfinite(number) and number.is_integer():
-        return int(number)
-    return number
+    parts = re.split(r"(?i)Answer\s*:", text)
+    if len(parts) > 1:
+        return parts[-1].strip()
+    if "####" in text:
+        return text.rsplit("####", 1)[-1].strip()
+    return text.strip()
 
 
 def score(task, rows):
+    """Score predictions using the official evaluation.py metrics."""
     if task in {"MT", "MT_CS"}:
         preds = [row["prediction"] for row in rows]
-        refs = [[row["reference"] for row in rows]]
-        bleu = sacrebleu.corpus_bleu(preds, refs)
-        chrf = sacrebleu.corpus_chrf(preds, refs)
-        return {"n": len(rows), "BLEU": bleu.score, "chrF2": chrf.score}
+        refs = [row["reference"] for row in rows]
+        bleu, chrfpp = compute_bleu_chrfpp(preds, refs)
+        return {"n": len(rows), "BLEU": bleu, "chrF++": chrfpp}
 
     if task == "QA":
-        correct = 0
+        gold = [int(row["reference"]) for row in rows]
+        pred = []
         parsed = 0
         for row in rows:
-            pred = parse_choice(row["prediction"], row["possible_answers"])
-            parsed += pred is not None
-            correct += pred == str(row["reference"])
-        return {"n": len(rows), "accuracy": correct / len(rows), "parsed": parsed / len(rows)}
+            choice = parse_choice(row["prediction"], row["possible_answers"])
+            if choice is not None:
+                parsed += 1
+                pred.append(int(choice))
+            else:
+                pred.append(-1)
+        return {
+            "n": len(rows),
+            "accuracy": accuracy_score(pred, gold),
+            "parsed": parsed / len(rows),
+        }
 
     if task in {"SC", "GC"}:
-        detection = 0
-        pair = 0
+        gold_incorrect = [row["incorrect_word"] for row in rows]
+        gold_correct = [row["correct_word"] for row in rows]
+        pred_incorrect = []
+        pred_correct = []
         parsed = 0
         for row in rows:
             wrong, correct_word = parse_error_pair(row["prediction"])
-            parsed += wrong is not None and correct_word is not None
-            ref_wrong = normalize_text(row["incorrect_word"])
-            ref_correct = normalize_text(row["correct_word"])
-            pred_wrong = normalize_text(wrong)
-            pred_correct = normalize_text(correct_word)
-            detection += pred_wrong.casefold() == ref_wrong.casefold()
-            pair += (
-                pred_wrong.casefold() == ref_wrong.casefold()
-                and pred_correct.casefold() == ref_correct.casefold()
-            )
+            if wrong is not None and correct_word is not None:
+                parsed += 1
+            pred_incorrect.append(wrong if wrong is not None else "")
+            pred_correct.append(correct_word if correct_word is not None else "")
         return {
             "n": len(rows),
-            "detection_accuracy": detection / len(rows),
-            "pair_accuracy": pair / len(rows),
+            "detection_accuracy": accuracy_score(pred_incorrect, gold_incorrect),
+            "correction_accuracy": accuracy_score(pred_correct, gold_correct),
             "parsed": parsed / len(rows),
         }
 
     if task == "MR":
-        correct = 0
-        parsed = 0
-        for row in rows:
-            pred = parse_number(row["prediction"])
-            parsed += pred is not None
-            correct += pred == row["reference"]
-        return {"n": len(rows), "accuracy": correct / len(rows), "parsed": parsed / len(rows)}
+        gold = [str(row["reference"]) for row in rows]
+        pred = [extract_mr_final_answer(row["prediction"]) for row in rows]
+        return {"n": len(rows), "accuracy": maths_reasoning_evaluation(gold, pred)}
 
     raise ValueError(task)
+
+
+def score_qa_with_splits(rows):
+    n_zno = len(read_jsonl(ROOT / "QA/ukr_qa_dev.jsonl"))
+    results = {"QA": score("QA", rows)}
+    if n_zno:
+        results["QA_zno"] = score("QA", rows[:n_zno])
+    if n_zno < len(rows):
+        results["QA_mmlu"] = score("QA", rows[n_zno:])
+    return results
+
+
+ALL_TASKS = ("MT", "MT_CS", "QA", "SC", "GC", "MR")
+
+
+def rescore_dir(output_dir: Path, tasks=None):
+    output_dir = Path(output_dir)
+    if tasks is None:
+        tasks = [task for task in ALL_TASKS if (output_dir / f"{task}.jsonl").exists()]
+    summary = {}
+    for task in tasks:
+        rows = read_jsonl(output_dir / f"{task}.jsonl")
+        if task == "QA":
+            summary.update(score_qa_with_splits(rows))
+        else:
+            summary[task] = score(task, rows)
+    return summary
 
 
 def main():
@@ -345,11 +371,29 @@ def main():
         default=None,
         help="Comma-separated task list, e.g. MT,GC,SC (default: all)",
     )
+    parser.add_argument(
+        "--rescore-only",
+        action="store_true",
+        help="Re-score existing JSONL predictions with official evaluation.py metrics",
+    )
     args = parser.parse_args()
 
     global OUT_DIR
     if args.output_dir is not None:
         OUT_DIR = args.output_dir
+
+    task_list = None
+    if args.tasks:
+        task_list = [t.strip() for t in args.tasks.split(",") if t.strip()]
+
+    if args.rescore_only:
+        summary = rescore_dir(OUT_DIR, tasks=task_list)
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        (OUT_DIR / "summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if args.lora_path is not None:
@@ -371,7 +415,7 @@ def main():
     model.eval()
 
     examples = build_examples()
-    max_new_tokens = {"MT": 192, "MT_CS": 192, "QA": 16, "SC": 40, "GC": 40, "MR": 256}
+    max_new_tokens = {"MT": 384, "MT_CS": 384, "QA": 32, "SC": 40, "GC": 40, "MR": 384}
     batch_sizes = {
         "MT": args.batch_size,
         "MT_CS": args.batch_size,
@@ -382,16 +426,26 @@ def main():
     }
     summary = {}
 
-    task_list = ["MT", "QA", "SC", "GC", "MR"]
-    if args.tasks:
-        task_list = [t.strip() for t in args.tasks.split(",") if t.strip()]
+    run_tasks = task_list or ["MT", "QA", "SC", "GC", "MR"]
 
-    for task in task_list:
+    for task in run_tasks:
         rows = generate_task(
-            model, tokenizer, task, examples[task], batch_sizes[task], max_new_tokens[task], force=args.force
+            model,
+            tokenizer,
+            task,
+            examples[task],
+            batch_sizes[task],
+            max_new_tokens[task],
+            force=args.force,
         )
-        summary[task] = score(task, rows)
-        print(task, json.dumps(summary[task], ensure_ascii=False), flush=True)
+        if task == "QA":
+            qa_results = score_qa_with_splits(rows)
+            summary.update(qa_results)
+            for key, value in qa_results.items():
+                print(key, json.dumps(value, ensure_ascii=False), flush=True)
+        else:
+            summary[task] = score(task, rows)
+            print(task, json.dumps(summary[task], ensure_ascii=False), flush=True)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     (OUT_DIR / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

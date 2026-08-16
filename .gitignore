@@ -72,3 +72,14 @@ Thumbs.db
 
 
 *.log
+
+# Submission exports
+Ukrainian/
+Ukrainian_*/
+*_submission.zip
+Ukrainian.zip
+hf_upload_best/
+_gh_sync/
+train.cs-uk.jsonl.gz
+*.jsonl.gz
+!scripts/**
