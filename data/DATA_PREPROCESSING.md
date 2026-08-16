@@ -1,27 +1,17 @@
 # Data Processing
 
-## EN→UK MT training data (SDKM + pseudo-documents)
+This file documents **corpus cleaning** used by TSV builders under
+`scripts/loader.py` / `scripts/cleaning_pipeline.py`.
 
-Scripts:
+For the **EN→UK Stage‑1 training recipe** (download → SDKM top‑75 →
+pseudo-documents), see **[`MT_EN_UK_PIPELINE.md`](../MT_EN_UK_PIPELINE.md)**.
 
-| Step | Script | Role |
-|------|--------|------|
-| 1 | `scripts/download_mt_en_uk.py` | Download OPUS Moses + NLLB EN–UK pairs → `data/raw/eng-ukr/train.eng|.ukr` |
-| 2 | `scripts/filter_mt_en_uk.py` | Length filter + Qwen2.5-3B mean-pool embeddings + cosine **top-75** vs. official EN-UK **dev Ukrainian** sentences → `data/processed/selected_en_uk.jsonl` |
-| 3 | `scripts/build_pseudo_docs_en_uk.py` | `paraphrase-multilingual-mpnet-base-v2` + MiniBatchKMeans; concat clusters at chunk sizes 3/5/8/12 → `data/pseudo_docs/train_pseudo_en_uk.jsonl` (also copied to Stage-1 path) |
-
-One-shot:
+Quick start for EN→UK:
 
 ```bash
 bash scripts/prepare_en_uk_mt.sh
-# or: SKIP_DOWNLOAD=1 TOP_K=75 bash scripts/prepare_en_uk_mt.sh
+# Stage-1 path: train_data/data/pseudo_docs/train_pseudo_en_uk.jsonl
 ```
-
-Stage-1 LoRA reads:
-
-`train_data/data/pseudo_docs/train_pseudo_en_uk.jsonl` (`src` / `tgt` JSONL).
-
-Retrieval note: similarity is computed on the **Ukrainian** side only (dev UK queries against train UK embeddings), then the matching EN–UK pairs are kept and deduplicated.
 
 ---
 
@@ -32,7 +22,7 @@ Eight sequential stages. Each stage operates on `(source, target)` sentence/para
 | Stage | Name | Method / Model | Purpose |
 |-------|------|----------------|---------|
 | S1 | Unicode + HTML | Regex, `html.unescape`, `unicodedata.normalize("NFC")` | Remove zero-width chars, control chars, HTML tags, garbled glyphs; collapse repeated words/chars and whitespace |
-| S2 | Structural filter | Percentile-based thresholds (6.5–93.5 pct) on char length and char/word length ratio; soft score on punctuation symmetry | Drop pairs that are too short,or misaligned in length |
+| S2 | Structural filter | Percentile-based thresholds (6.5–93.5 pct) on char length and char/word length ratio; soft score on punctuation symmetry | Drop pairs that are too short, or misaligned in length |
 | S3 | Deduplication | Exact: **Bloom filter** (MurmurHash3). Near: **MinHash + LSH** (128 permutations, band-based, Jaccard ≈ 0.90 threshold) | Remove identical and near-duplicate sentence pairs across the full corpus |
 | S4 | Language ID | **FastText `lid.176.bin`** (Meta), confidence ≥ 0.87 | Keep only pairs where source is the expected language and target is Ukrainian |
 | S5 | Ukrainian quality | Rule-based: ratio of Ukrainian-only letters (і,ї,є,ґ), penalise Russian character markers (ы,э,ъ,ё) and Russian function words | Score target-side Cyrillics; detect and penalise Russian contamination |
@@ -43,6 +33,10 @@ Eight sequential stages. Each stage operates on `(source, target)` sentence/para
 ---
 
 ## Per-Corpus Filters Applied
+
+These filters apply when building cleaned **TSV** corpora (used e.g. by
+`scripts/converter.py` / CS–UK paragraph assembly). They are complementary to
+the SDKM + pseudo-doc path in `MT_EN_UK_PIPELINE.md`.
 
 ### MT Training — en-uk
 
@@ -61,5 +55,4 @@ Eight sequential stages. Each stage operates on `(source, target)` sentence/para
 |--------|-------------------|-----------------|
 | **NLLB cs-uk** | `laser_score ≥ 1.2` | S1 S2 S3 S4 S5 S6 S7 S8 |
 | **OpenSubtitles cs-uk** | None | S1 S2 S3 S4 S5 S6 S7 S8 |
-
-
+| **EUbookshop / ELRC / Wikimedia / fiction** | See `scripts/prepare_cs_paragraph_mt.py` | Cleaning stages via `loader.build_pipeline` |

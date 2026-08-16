@@ -28,18 +28,24 @@ Our unified system is best on **all reported metrics except QA** (where Koshi le
 
 ## Method in one page
 
-1. **Stage 1 — foundation skills**  
+1. **EN→UK MT data**  
+   Download OPUS/NLLB pairs → length filter → **SDKM-style top‑75** retrieval
+   against official EN–UK **dev Ukrainian** (Qwen2.5 embeddings + cosine) →
+   semantic-cluster **pseudo-documents** for document-length training.
+   Details: [`MT_EN_UK_PIPELINE.md`](MT_EN_UK_PIPELINE.md).
+
+2. **Stage 1 — foundation skills**  
    LoRA (`r=16`, `α=32`) on **MT (en→uk) + GC + SC**, up to 5 epochs.  
    Pick best checkpoint by combined **dev MT+GC+SC** (typically **epoch 1**, `checkpoint-3931`).
 
-2. **Stage 2 — QA/MR + anti-forgetting**  
+3. **Stage 2 — QA/MR + anti-forgetting**  
    Continue the Stage‑1 LoRA for **1 epoch** with:
    - QA (translated MMLU-en + mmlu_ukr + ZNO train)
    - MR (GSM8K + competition_math, Ukrainian)
    - replay: 5k MT + 5k GC
    - **full CS→UK** chat data (`train.cs-uk.jsonl.gz`, 16946 examples)
 
-3. **Test inference → official layout**  
+4. **Test inference → official layout**  
    Task-specific prompts → `Ukrainian/*.jsonl` (+ zip) via `export_ukrainian_submission.py`.
 
 ---
@@ -119,31 +125,42 @@ python3 scripts/export_ukrainian_submission.py \
 ```
 .
 ├── README.md
+├── MT_EN_UK_PIPELINE.md              # EN→UK download / SDKM / pseudo-docs
+├── QA_PIPELINE.md                    # QA corpus assembly
 ├── eval_qwen35_ukrainian_zeroshot.py # multi-task dev evaluation
+├── data/DATA_PREPROCESSING.md        # TSV cleaning stages (loader)
 ├── scripts/
+│   ├── prepare_en_uk_mt.sh           # EN→UK one-shot data prep
+│   ├── download_mt_en_uk.py
+│   ├── filter_mt_en_uk.py
+│   ├── build_pseudo_docs_en_uk.py
+│   ├── prepare_corpus_mt.sh          # CS→UK paragraph MT
 │   ├── lora_train_utils.py
 │   ├── finetune_stage1_mt_gc_sc.py
 │   ├── finetune_stage2_qa_mr_ukr_mix.py
-│   ├── run_stage2_ukr_mix_cs.sh              # canonical Stage2 + pick + dev eval
-│   ├── run_stage2_csuk_new_then_test.sh      # best Stage2 (full cs-uk) + TEST + submit
+│   ├── run_stage2_ukr_mix_cs.sh
+│   ├── run_stage2_csuk_new_then_test.sh
 │   ├── infer_ukrainian_test.py
 │   ├── export_ukrainian_submission.py
-│   ├── pick_best_stage{1,2}_checkpoint.py
 │   └── train_two_stage.sh
 ├── train_data/                       # gitignored
 ├── llms-limited-resources2026/       # gitignored
 └── outputs/                          # gitignored
 ```
 
-Data preparation helpers (`download_*.sh`, `prepare_*.py`, `translate_train_en_uk.py`, QA cleaning under `scripts/qa/`, etc.) remain in `scripts/` for reproducing the training corpora.
+### Data preparation
 
-### EN→UK MT data (SDKM + pseudo-docs)
+| Task | Doc / command |
+|------|----------------|
+| **EN→UK MT** (SDKM + pseudo-docs) | [`MT_EN_UK_PIPELINE.md`](MT_EN_UK_PIPELINE.md) · `bash scripts/prepare_en_uk_mt.sh` |
+| **CS→UK MT** (paragraph corpora) | `bash scripts/prepare_corpus_mt.sh` |
+| **QA** | [`QA_PIPELINE.md`](QA_PIPELINE.md) · `bash scripts/prepare_qa_training.sh` |
+| **All other tasks** | `bash scripts/download_all_data.sh` (set `SKIP_EN_UK_MT=1` to skip heavy EN→UK) |
+| TSV cleaning stages | [`data/DATA_PREPROCESSING.md`](data/DATA_PREPROCESSING.md) |
 
-```bash
-bash scripts/prepare_en_uk_mt.sh
-```
+EN→UK Stage‑1 input path after prep:
 
-This downloads OPUS/NLLB EN–UK pairs, filters by length, retrieves **top-75** training sentences most similar to official EN-UK **dev Ukrainian** (Qwen2.5-3B embeddings + cosine), then builds semantic-cluster **pseudo-documents** for Stage‑1 (`train_data/data/pseudo_docs/train_pseudo_en_uk.jsonl`). See `data/DATA_PREPROCESSING.md`.
+`train_data/data/pseudo_docs/train_pseudo_en_uk.jsonl`
 
 ---
 
