@@ -1,5 +1,30 @@
 # Data Processing
 
+## EN→UK MT training data (SDKM + pseudo-documents)
+
+Scripts:
+
+| Step | Script | Role |
+|------|--------|------|
+| 1 | `scripts/download_mt_en_uk.py` | Download OPUS Moses + NLLB EN–UK pairs → `data/raw/eng-ukr/train.eng|.ukr` |
+| 2 | `scripts/filter_mt_en_uk.py` | Length filter + Qwen2.5-3B mean-pool embeddings + cosine **top-75** vs. official EN-UK **dev Ukrainian** sentences → `data/processed/selected_en_uk.jsonl` |
+| 3 | `scripts/build_pseudo_docs_en_uk.py` | `paraphrase-multilingual-mpnet-base-v2` + MiniBatchKMeans; concat clusters at chunk sizes 3/5/8/12 → `data/pseudo_docs/train_pseudo_en_uk.jsonl` (also copied to Stage-1 path) |
+
+One-shot:
+
+```bash
+bash scripts/prepare_en_uk_mt.sh
+# or: SKIP_DOWNLOAD=1 TOP_K=75 bash scripts/prepare_en_uk_mt.sh
+```
+
+Stage-1 LoRA reads:
+
+`train_data/data/pseudo_docs/train_pseudo_en_uk.jsonl` (`src` / `tgt` JSONL).
+
+Retrieval note: similarity is computed on the **Ukrainian** side only (dev UK queries against train UK embeddings), then the matching EN–UK pairs are kept and deduplicated.
+
+---
+
 ## Cleaning Pipeline (`cleaning_pipeline.py`)
 
 Eight sequential stages. Each stage operates on `(source, target)` sentence/paragraph pairs.

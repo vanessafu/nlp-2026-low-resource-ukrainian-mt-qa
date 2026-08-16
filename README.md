@@ -137,6 +137,14 @@ python3 scripts/export_ukrainian_submission.py \
 
 Data preparation helpers (`download_*.sh`, `prepare_*.py`, `translate_train_en_uk.py`, QA cleaning under `scripts/qa/`, etc.) remain in `scripts/` for reproducing the training corpora.
 
+### EN→UK MT data (SDKM + pseudo-docs)
+
+```bash
+bash scripts/prepare_en_uk_mt.sh
+```
+
+This downloads OPUS/NLLB EN–UK pairs, filters by length, retrieves **top-75** training sentences most similar to official EN-UK **dev Ukrainian** (Qwen2.5-3B embeddings + cosine), then builds semantic-cluster **pseudo-documents** for Stage‑1 (`train_data/data/pseudo_docs/train_pseudo_en_uk.jsonl`). See `data/DATA_PREPROCESSING.md`.
+
 ---
 
 ## Defaults

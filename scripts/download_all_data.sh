@@ -22,10 +22,20 @@ python3 scripts/prepare_ua_gec_gc.py
 echo "========== 5/6 SC (synthetic from mmlu_ukr) =========="
 python3 scripts/prepare_mmlu_ukr_sc.py
 
-echo "========== 6/6 MT note =========="
-echo "MT parallel data is not auto-downloaded."
-echo "  Option A: place en-uk parallel jsonl at train_data/data/pseudo_docs/train_pseudo_en_uk.jsonl"
-echo "  Option B: use version-1 combined corpus (train.jsonl.gz) with --mt-format version1"
+echo "========== 6/6 MT (EN→UK via SDKM + pseudo-docs) =========="
+echo "Building EN→UK training data (download → filter/top-75 → pseudo-docs)."
+echo "This step is heavy (GPU embeddings). To skip: SKIP_EN_UK_MT=1"
+if [[ "${SKIP_EN_UK_MT:-0}" == "1" ]]; then
+  echo "SKIP_EN_UK_MT=1 — not running prepare_en_uk_mt.sh"
+  echo "  Manual options:"
+  echo "    bash scripts/prepare_en_uk_mt.sh"
+  echo "    or place jsonl at train_data/data/pseudo_docs/train_pseudo_en_uk.jsonl"
+else
+  bash scripts/prepare_en_uk_mt.sh
+fi
+echo ""
+echo "CS→UK paragraph MT (optional):"
+echo "  bash scripts/prepare_corpus_mt.sh"
 echo ""
 echo "Optional: translate QA/MR to Ukrainian for Stage 2 bilingual training:"
 echo "  bash scripts/run_translate_en_uk.sh"
