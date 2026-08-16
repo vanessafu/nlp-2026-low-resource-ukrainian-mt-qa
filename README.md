@@ -7,7 +7,6 @@
 |----------|------|
 | **Hugging Face (LoRA)** | [`MDK-YLC/Qwen3.5-2B-WMT26-Ukrainian-LoRA`](https://huggingface.co/MDK-YLC/Qwen3.5-2B-WMT26-Ukrainian-LoRA) |
 | **Base model** | [`Qwen/Qwen3.5-2B`](https://huggingface.co/Qwen/Qwen3.5-2B) |
-| **System description (LaTeX draft)** | [`paper/zolint_wmt2026.tex`](paper/zolint_wmt2026.tex) |
 
 This repository contains the **runnable training / evaluation / submission** code for our unified Ukrainian multitask system (MT, QA, SC, GC, MR).
 
@@ -24,7 +23,6 @@ Our unified system is best on **all reported metrics except QA** (where Koshi le
 | Koshi | 16.80 | 6.01 | 0.70 | **46.99** | 52.50 | 30.55 | 0.40 |
 | **Ours (Zolint)** | **49.86** | **23.66** | **15.43** | 41.15 | **66.43** | **45.18** | **21.60** |
 
-Full metric breakdown (CS/EN chrF++, UkrQA/UkrMMLU, Wrong/Corrected EM, …) is in [`paper/zolint_wmt2026.tex`](paper/zolint_wmt2026.tex) (Table of official test results).
 
 ---
 
@@ -121,7 +119,6 @@ python3 scripts/export_ukrainian_submission.py \
 ```
 .
 ├── README.md
-├── paper/zolint_wmt2026.tex          # system-description draft (title + official table)
 ├── eval_qwen35_ukrainian_zeroshot.py # multi-task dev evaluation
 ├── scripts/
 │   ├── lora_train_utils.py
