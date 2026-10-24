@@ -6,6 +6,7 @@
 | Resource | Link |
 |----------|------|
 | **Hugging Face (LoRA)** | [`MDK-YLC/Qwen3.5-2B-WMT26-Ukrainian-LoRA`](https://huggingface.co/MDK-YLC/Qwen3.5-2B-WMT26-Ukrainian-LoRA) |
+| **Hugging Face (Dataset)** | [`MDK-YLC/DBLP-T`](https://huggingface.co/datasets/MDK-YLC/DBLP-T) |
 | **Base model** | [`Qwen/Qwen3.5-2B`](https://huggingface.co/Qwen/Qwen3.5-2B) |
 
 This repository contains the **runnable training / evaluation / submission** code for our unified Ukrainian multitask system (MT, QA, SC, GC, MR).
